@@ -25,6 +25,13 @@
 #   Configuration (env vars):
 #     DHIS2_BASE                     Required, same as the other d2-* tools.
 #     D2_BROKER_PORT                 Listen port (default 9300).
+#     D2_BROKER_BIND                 Bind address (default 127.0.0.1). On
+#                                    Docker Desktop for Mac, containers reach
+#                                    loopback-bound host services through
+#                                    host.docker.internal, so the broker is
+#                                    never exposed to the LAN. On Linux
+#                                    (host-gateway), set this to the docker
+#                                    bridge IP or 0.0.0.0.
 #     D2_BROKER_MAX_AGENT_INSTANCES  Cap on agent-* instances (default 5).
 #     D2_BROKER_JOB_TIMEOUT          Per-job timeout in seconds (default 7200).
 
@@ -700,8 +707,9 @@ def cmd_run():
     Handler.tokens = tokens
     Handler.jobs = JobManager()
     port = broker_port()
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"d2-broker listening on 0.0.0.0:{port} "
+    bind = os.environ.get("D2_BROKER_BIND", "127.0.0.1")
+    server = ThreadingHTTPServer((bind, port), Handler)
+    print(f"d2-broker listening on {bind}:{port} "
           f"(DHIS2_BASE={dhis2_base()})", flush=True)
     print(f"Tokens: {broker_dir() / 'tokens.json'}", flush=True)
     try:
@@ -739,6 +747,9 @@ def cmd_install():
     if os.environ.get("D2_BROKER_PORT"):
         env_lines += (f"      <key>D2_BROKER_PORT</key>"
                       f"<string>{broker_port()}</string>\n")
+    if os.environ.get("D2_BROKER_BIND"):
+        env_lines += (f"      <key>D2_BROKER_BIND</key>"
+                      f"<string>{os.environ['D2_BROKER_BIND']}</string>\n")
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

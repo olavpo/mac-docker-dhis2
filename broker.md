@@ -29,7 +29,8 @@ launchd plist):
 | Variable | Default | Meaning |
 |---|---|---|
 | `DHIS2_BASE` | (required) | Same base directory as the other d2-* tools |
-| `D2_BROKER_PORT` | `9300` | Listen port (binds `0.0.0.0`) |
+| `D2_BROKER_PORT` | `9300` | Listen port |
+| `D2_BROKER_BIND` | `127.0.0.1` | Bind address — loopback-only by default; see below |
 | `D2_BROKER_MAX_AGENT_INSTANCES` | `5` | Cap on concurrent `agent-*` instances |
 | `D2_BROKER_JOB_TIMEOUT` | `7200` | Per-job timeout, seconds |
 
@@ -39,10 +40,17 @@ seed downloads).
 
 ## Security model
 
+**Loopback-only by default.** The broker binds `127.0.0.1`, so nothing on
+the LAN can reach it. Containers still can: on Docker Desktop for Mac,
+`host.docker.internal` traffic is relayed by the Docker Desktop process on
+the host, which connects to loopback (verified). On Linux with
+`host-gateway`, that relay doesn't exist — set `D2_BROKER_BIND` to the
+docker bridge IP (or `0.0.0.0`) there.
+
 **Two bearer tokens** (`$DHIS2_BASE/_broker/tokens.json`), both mandatory —
-there is **no unauthenticated localhost bypass**, because on Docker Desktop
-for Mac container traffic to `host.docker.internal` arrives from 127.0.0.1,
-making source-IP trust meaningless:
+there is **no unauthenticated localhost bypass**, because that same Docker
+Desktop relay makes container traffic arrive *from* 127.0.0.1, so source-IP
+trust cannot distinguish the sandbox from your own curl:
 
 - **admin** (`scope: all`) — full access. For the user's own clients.
 - **agent** (`scope: agent`) — for AI agents. Restricted to:
