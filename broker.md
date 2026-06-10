@@ -132,7 +132,10 @@ curl -s -X DELETE -H "Authorization: Bearer $TOKEN" $B/instances/agent-test1
 
 On success, a create/reset/start job's `result` carries the instance info,
 including `devnet_url` (`http://dhis2-<name>:8080`, reachable from containers
-on the `dev-net` Docker network) and `localhost_url` (host browser).
+on the `dev-net` Docker network), `devnet_db` (`dhis2-<name>-db:5432`,
+PostgreSQL `dhis`/`dhis`/`dhis2` — the broker attaches the DB container of
+created instances to dev-net as a debugging side-door), and `localhost_url`
+(host browser; not reachable from inside containers).
 
 ## Sandbox integration (ai-agentic-sandbox)
 

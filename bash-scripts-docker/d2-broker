@@ -160,6 +160,7 @@ def list_instances():
         http_port = container_port(tomcat, "8080/tcp")
         pg_port = container_port(db, "5432/tcp") if db else None
         on_devnet = "dev-net" in container_networks(tomcat)
+        db_on_devnet = bool(db) and "dev-net" in container_networks(db)
         instances.append({
             "name": inst,
             "status": status,
@@ -167,6 +168,7 @@ def list_instances():
             "pg_port": pg_port,
             "localhost_url": f"http://localhost:{http_port}" if http_port else None,
             "devnet_url": f"http://dhis2-{inst}:8080" if on_devnet else None,
+            "devnet_db": f"dhis2-{inst}-db:5432" if db_on_devnet else None,
             "agent_managed": inst.startswith(AGENT_PREFIX),
         })
     return instances
@@ -303,9 +305,9 @@ class JobManager:
                     if j["instance"] == instance
                     and j["status"] in ("queued", "running")]
 
-    def submit(self, op, instance, steps, post_argv=None, cleanup=None):
+    def submit(self, op, instance, steps, post_cmds=None, cleanup=None):
         """steps: list of argv to run sequentially (any failure fails the
-        job). post_argv: best-effort follow-up. cleanup: paths removed when
+        job). post_cmds: best-effort follow-ups. cleanup: paths removed when
         the job finishes, success or not (e.g. downloaded seed files)."""
         job = {
             "id": "j-" + secrets.token_hex(4),
@@ -322,7 +324,7 @@ class JobManager:
         with self.lock:
             self.jobs[job["id"]] = job
         self._persist(job)
-        self.queue.put((job, steps, post_argv, cleanup or []))
+        self.queue.put((job, steps, post_cmds or [], cleanup or []))
         return job
 
     def get(self, job_id):
@@ -346,7 +348,7 @@ class JobManager:
 
     def _worker(self):
         while True:
-            job, steps, post_argv, cleanup = self.queue.get()
+            job, steps, post_cmds, cleanup = self.queue.get()
             job["status"] = "running"
             job["started_at"] = now_iso()
             self._persist(job)
@@ -364,14 +366,15 @@ class JobManager:
                         job["exit_code"] = proc.returncode
                         if proc.returncode != 0:
                             break
-                    if job["exit_code"] == 0 and post_argv:
-                        log.write(f"\n$ {' '.join(post_argv)}\n")
-                        log.flush()
-                        # Best-effort follow-up (e.g. dev-net attach): failure
-                        # is logged but does not fail the job.
-                        subprocess.run(post_argv, stdout=log,
-                                       stderr=subprocess.STDOUT, timeout=120,
-                                       env=os.environ)
+                    if job["exit_code"] == 0:
+                        for post in post_cmds:
+                            log.write(f"\n$ {' '.join(post)}\n")
+                            log.flush()
+                            # Best-effort follow-ups (e.g. dev-net attach):
+                            # failure is logged but does not fail the job.
+                            subprocess.run(post, stdout=log,
+                                           stderr=subprocess.STDOUT,
+                                           timeout=120, env=os.environ)
                 if job["exit_code"] == 0:
                     if job["op"] in ("create", "reset", "start"):
                         job["result"] = next(
@@ -606,11 +609,18 @@ class Handler(BaseHTTPRequestHandler):
             argv += ["-t", str(body["tomcat"])]
         argv.append(name)
 
-        # The compose template already joins dev-net; the attach is an
-        # idempotent belt-and-braces so the sandbox can always resolve it.
-        attach = [str(SCRIPT_DIR / "d2-dev-net-attach"), name]
+        # The compose template already joins dev-net for Tomcat; the attach
+        # is an idempotent belt-and-braces so the sandbox can always resolve
+        # it. The DB container is attached too (alias dhis2-<name>-db) — a
+        # Postgres side-door for test debugging (e.g. querying analytics
+        # tables directly) that has proven essential in practice.
+        post_cmds = [
+            [str(SCRIPT_DIR / "d2-dev-net-attach"), name],
+            ["docker", "network", "connect", "--alias", f"dhis2-{name}-db",
+             "dev-net", f"{name}-db-1"],
+        ]
         job = self.jobs.submit("create", name, pre_steps + [argv],
-                               post_argv=attach, cleanup=cleanup)
+                               post_cmds=post_cmds, cleanup=cleanup)
         return self.job_response(job)
 
     def prepare_seed(self, seed, scope):

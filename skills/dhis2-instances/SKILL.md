@@ -59,14 +59,38 @@ curl -s -X DELETE -H "$H" $B/instances/agent-mytest
 ## Reaching the instance
 
 On success the job `result` includes `devnet_url`, normally
-`http://dhis2-agent-mytest:8080`. From inside the sandbox, use that URL
-(both sandbox and instance are on the `dev-net` Docker network):
+`http://dhis2-agent-mytest:8080`. From inside the sandbox, **always use
+`devnet_url`** (both sandbox and instance are on the `dev-net` Docker
+network):
 
 ```bash
 curl -s -u admin:district http://dhis2-agent-mytest:8080/api/system/info
 ```
 
-Notes:
+- **Never use `localhost_url` or any `localhost:<port>`** — those are the
+  ports the instance publishes to the *host*; from inside the sandbox,
+  nothing answers on localhost. (`localhost_url` is in the API response for
+  the user's benefit.)
+- If a DHIS2 instance is *not* broker-created and its name doesn't resolve,
+  it probably isn't on dev-net: its host-published port may still be
+  reachable on the Docker gateway IP — `ip route | awk '/default/ {print $3}'`,
+  then probe `<gateway-ip>:<port>`. Prefer asking the user to attach it to
+  dev-net (`d2-dev-net-attach <name>`).
+
+### Direct database access
+
+`result.devnet_db` (normally `dhis2-agent-mytest-db:5432`) is the instance's
+PostgreSQL, also on dev-net: database `dhis2`, user `dhis`, password `dhis`.
+Use it when API-level checks aren't conclusive — e.g. verifying whether
+values were actually stored in `datavalue`, or inspecting `analytics_<year>`
+tables when analytics output looks wrong:
+
+```bash
+PGPASSWORD=dhis psql -h dhis2-agent-mytest-db -U dhis -d dhis2 \
+  -c "SELECT count(*) FROM datavalue;"
+```
+
+### Other notes
 
 - **Default credentials** `admin` / `district` (standard DHIS2 dev default;
   seeds may differ — ask the user if login fails).
@@ -82,6 +106,9 @@ Notes:
 
 ## Etiquette
 
+- Test runs **mutate** the instance (imported data, changed settings,
+  metadata edits). For reproducible results, reset from a seed — or delete
+  and re-create — between runs rather than reusing dirty state.
 - Reuse your existing `agent-*` instance when it fits; reset instead of
   recreate when you just need clean data.
 - Delete instances when a task is done, unless the user wants them kept.
