@@ -23,6 +23,8 @@ Scripts to help you:
 - Check instance status
 - Inspect logs and connect to PostgreSQL
 - Detect DHIS2 version from a database backup
+- Expose all of the above over a local HTTP API (`d2-broker`) for other
+  clients — AI agent sandboxes, menu bar widgets, dashboards. See [broker.md](broker.md).
 
 All scripts are in `bash-scripts-docker/` and expect:
 
@@ -84,6 +86,10 @@ All scripts are in `bash-scripts-docker/` and expect:
   - `d2-deploy-war` — deploy a WAR by version, URL, or local file
   - `d2-info` — list instances, ports, DB version, and status
   - `d2-logtail` — `docker logs -f` for Tomcat
+
+- **HTTP API**
+  - `d2-broker` — token-authenticated local HTTP API over the scripts above,
+    with a restricted scope for AI agent sandboxes ([broker.md](broker.md))
 
 ---
 

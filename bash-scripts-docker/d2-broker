@@ -1,0 +1,812 @@
+#!/usr/bin/env python3
+#       ____  __  ______________
+#      / __ \/ / / /  _/ ___/__ \
+#     / / / / /_/ // / \__ \__/ /
+#    / /_/ / __  // / ___/ / __/
+#   /_____/_/ /_/___/____/____/
+#
+#   d2-broker — small HTTP API over the d2-* instance scripts, so other
+#   clients (agent sandboxes, a menu bar widget, a dashboard) can create,
+#   reset, start/stop and delete DHIS2 Docker instances without shell
+#   access to this machine.
+#
+#   Exposes a fixed verb set only — never arbitrary commands. Every request
+#   needs a bearer token; the "agent" token is restricted to instances whose
+#   name starts with "agent-". See broker.md in the repo root for the full
+#   API contract and security model.
+#
+#   Subcommands:
+#     d2-broker run         Run the server in the foreground
+#     d2-broker tokens      Create (if missing) and print the API tokens
+#     d2-broker install     Install as a launchd agent (starts at login)
+#     d2-broker uninstall   Remove the launchd agent
+#     d2-broker status      Show launchd + HTTP health status
+#
+#   Configuration (env vars):
+#     DHIS2_BASE                     Required, same as the other d2-* tools.
+#     D2_BROKER_PORT                 Listen port (default 9300).
+#     D2_BROKER_MAX_AGENT_INSTANCES  Cap on agent-* instances (default 5).
+#     D2_BROKER_JOB_TIMEOUT          Per-job timeout in seconds (default 7200).
+
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from queue import Queue
+from urllib.parse import urlparse, parse_qs
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_PORT = 9300
+LAUNCHD_LABEL = "org.dhis2.d2-broker"
+AGENT_PREFIX = "agent-"
+
+NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,29}$")
+VERSION_RE = re.compile(r"^[0-9][0-9.]{0,15}$")
+SEED_SUFFIXES = (".sql", ".sql.gz", ".pgc")
+
+
+def dhis2_base():
+    base = os.environ.get("DHIS2_BASE")
+    if not base:
+        sys.exit("Error: DHIS2_BASE environment variable not set")
+    return Path(base)
+
+
+def broker_dir():
+    d = dhis2_base() / "_broker"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def seeds_dir():
+    """Curated demo/test dumps the user has explicitly approved for agent
+    use. Real-data backups live in _backups and are admin-only."""
+    return dhis2_base() / "_seeds"
+
+
+def backups_dir():
+    return dhis2_base() / "_backups"
+
+
+def broker_port():
+    return int(os.environ.get("D2_BROKER_PORT", DEFAULT_PORT))
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# --- Tokens ----------------------------------------------------------------
+# tokens.json holds two bearer tokens: "admin" (full access, for the user's
+# own clients like a menu bar widget) and "agent" (restricted to agent-*
+# instances, passed into sandboxes by agent-sandbox.sh).
+
+def load_or_create_tokens():
+    path = broker_dir() / "tokens.json"
+    if path.exists():
+        with open(path) as f:
+            return json.load(f)
+    tokens = {
+        "admin": {"token": secrets.token_hex(24), "scope": "all"},
+        "agent": {"token": secrets.token_hex(24), "scope": "agent"},
+    }
+    with open(path, "w") as f:
+        json.dump(tokens, f, indent=2)
+    os.chmod(path, 0o600)
+    return tokens
+
+
+# --- Docker / instance helpers ---------------------------------------------
+
+def run_out(argv, timeout=30):
+    return subprocess.run(
+        argv, capture_output=True, text=True, timeout=timeout
+    ).stdout
+
+
+def container_port(container, internal):
+    out = run_out(["docker", "port", container, internal])
+    m = re.search(r"0\.0\.0\.0:(\d+)", out)
+    return int(m.group(1)) if m else None
+
+
+def container_state(container):
+    out = run_out(["docker", "inspect", "-f", "{{.State.Status}}", container]).strip()
+    return out or "missing"
+
+
+def container_networks(container):
+    out = run_out(
+        ["docker", "inspect", "-f",
+         "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}", container]
+    )
+    return out.split()
+
+
+def list_instances():
+    """Mirror of d2-info: find <name>(-|_)tomcat(-|_)1 containers, collect
+    ports, state, and dev-net reachability for each."""
+    names = run_out(["docker", "ps", "-a", "--format", "{{.Names}}"]).split()
+    tomcats = {}
+    dbs = {}
+    for n in names:
+        m = re.match(r"^(.+?)[-_]tomcat[-_]1$", n)
+        if m:
+            tomcats[m.group(1)] = n
+        m = re.match(r"^(.+?)[-_]db[-_]1$", n)
+        if m:
+            dbs[m.group(1)] = n
+
+    instances = []
+    for inst, tomcat in sorted(tomcats.items()):
+        db = dbs.get(inst)
+        t_state = container_state(tomcat)
+        d_state = container_state(db) if db else "missing"
+        if t_state == "running" and d_state == "running":
+            status = "running"
+        elif "running" in (t_state, d_state):
+            status = "partial"
+        else:
+            status = "stopped"
+        http_port = container_port(tomcat, "8080/tcp")
+        pg_port = container_port(db, "5432/tcp") if db else None
+        on_devnet = "dev-net" in container_networks(tomcat)
+        instances.append({
+            "name": inst,
+            "status": status,
+            "http_port": http_port,
+            "pg_port": pg_port,
+            "localhost_url": f"http://localhost:{http_port}" if http_port else None,
+            "devnet_url": f"http://dhis2-{inst}:8080" if on_devnet else None,
+            "agent_managed": inst.startswith(AGENT_PREFIX),
+        })
+    return instances
+
+
+def instance_version(name):
+    """DHIS2 major version from flyway_schema_history (same query as d2-lib.sh)."""
+    try:
+        for db in (f"{name}-db-1", f"{name}_db_1"):
+            out = run_out(
+                ["docker", "exec", db, "psql", "-U", "dhis", "-d", "dhis2", "-t", "-c",
+                 "SELECT version FROM flyway_schema_history "
+                 "ORDER BY installed_rank DESC LIMIT 1;"],
+                timeout=10,
+            ).strip()
+            if out:
+                return out.split(".")[1] if "." in out else out
+    except Exception:
+        pass
+    return None
+
+
+def _scan_dump_files(root, source):
+    if not root.is_dir():
+        return []
+    found = []
+    for p in sorted(root.rglob("*")):
+        if p.is_file() and p.name.endswith(SEED_SUFFIXES):
+            prefix = "backups/" if source == "backups" else ""
+            found.append({
+                "path": prefix + str(p.relative_to(root)),
+                "source": source,
+                "size_bytes": p.stat().st_size,
+                "modified": datetime.fromtimestamp(
+                    p.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"),
+            })
+    return found
+
+
+def list_seeds(scope):
+    """Agent tokens see only the curated _seeds directory. The admin token
+    additionally sees _backups (real-data backups, for manual restores)."""
+    seeds = _scan_dump_files(seeds_dir(), "seeds")
+    if scope == "all":
+        seeds += _scan_dump_files(backups_dir(), "backups")
+    return seeds
+
+
+def _resolve_within(root, rel):
+    p = (root / rel).resolve()
+    if not str(p).startswith(str(root.resolve()) + os.sep):
+        raise ApiError(400, "seed path escapes its directory")
+    return p
+
+
+def resolve_seed(seed, scope):
+    """Resolve a seed reference to (path, download_url).
+
+    Agent scope: relative path inside $DHIS2_BASE/_seeds only — never
+    real-data backups, arbitrary host paths, or URLs. Agents that need a
+    clean instance simply create one without a seed.
+
+    Admin scope additionally accepts: a relative path in _backups
+    (prefix 'backups/' or bare), an absolute file path, or an http(s) URL
+    (downloaded by the job worker before the restore step).
+    """
+    if seed.startswith(("http://", "https://")):
+        if scope != "all":
+            raise ApiError(403, "seed URLs require the admin token")
+        return None, seed
+    if os.path.isabs(seed):
+        if scope != "all":
+            raise ApiError(403, "agent tokens may only use seeds from the "
+                                "curated _seeds/ directory (see GET /seeds)")
+        p = Path(seed)
+    elif seed.startswith("backups/"):
+        if scope != "all":
+            raise ApiError(403, "backups/ seeds require the admin token")
+        p = _resolve_within(backups_dir(), seed[len("backups/"):])
+    else:
+        p = _resolve_within(seeds_dir(), seed)
+        if not p.is_file() and scope == "all":
+            p = _resolve_within(backups_dir(), seed)
+    if not p.is_file():
+        raise ApiError(404, f"seed file not found: {seed}")
+    if not p.name.endswith(SEED_SUFFIXES):
+        raise ApiError(400, f"seed must be one of {SEED_SUFFIXES}")
+    return p, None
+
+
+# --- Jobs ------------------------------------------------------------------
+# Long-running operations (create / reset / delete) run as jobs on a single
+# worker thread. Global serialization is deliberate: d2-instance-create
+# auto-selects free ports by scanning, so two concurrent creates could pick
+# the same port. Job logs and a JSON snapshot persist under _broker/jobs/.
+
+class ApiError(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+class JobManager:
+    def __init__(self):
+        self.jobs = {}
+        self.lock = threading.Lock()
+        self.queue = Queue()
+        self.dir = broker_dir() / "jobs"
+        self.dir.mkdir(exist_ok=True)
+        self.timeout = int(os.environ.get("D2_BROKER_JOB_TIMEOUT", 7200))
+        self._load_previous()
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _load_previous(self):
+        for f in self.dir.glob("*.json"):
+            try:
+                with open(f) as fh:
+                    job = json.load(fh)
+                # The broker died mid-job; the subprocess is gone with it.
+                if job.get("status") in ("queued", "running"):
+                    job["status"] = "interrupted"
+                self.jobs[job["id"]] = job
+            except Exception:
+                continue
+
+    def _persist(self, job):
+        with open(self.dir / f"{job['id']}.json", "w") as f:
+            json.dump(job, f, indent=2)
+
+    def active_for(self, instance):
+        with self.lock:
+            return [j for j in self.jobs.values()
+                    if j["instance"] == instance
+                    and j["status"] in ("queued", "running")]
+
+    def submit(self, op, instance, steps, post_argv=None, cleanup=None):
+        """steps: list of argv to run sequentially (any failure fails the
+        job). post_argv: best-effort follow-up. cleanup: paths removed when
+        the job finishes, success or not (e.g. downloaded seed files)."""
+        job = {
+            "id": "j-" + secrets.token_hex(4),
+            "op": op,
+            "instance": instance,
+            "status": "queued",
+            "created_at": now_iso(),
+            "started_at": None,
+            "finished_at": None,
+            "exit_code": None,
+            "error": None,
+            "result": None,
+        }
+        with self.lock:
+            self.jobs[job["id"]] = job
+        self._persist(job)
+        self.queue.put((job, steps, post_argv, cleanup or []))
+        return job
+
+    def get(self, job_id):
+        with self.lock:
+            return self.jobs.get(job_id)
+
+    def list(self, limit=50):
+        with self.lock:
+            jobs = sorted(self.jobs.values(),
+                          key=lambda j: j["created_at"], reverse=True)
+        return jobs[:limit]
+
+    def log_path(self, job_id):
+        return self.dir / f"{job_id}.log"
+
+    def log_tail(self, job_id, lines=20):
+        path = self.log_path(job_id)
+        if not path.exists():
+            return ""
+        return "\n".join(path.read_text(errors="replace").splitlines()[-lines:])
+
+    def _worker(self):
+        while True:
+            job, steps, post_argv, cleanup = self.queue.get()
+            job["status"] = "running"
+            job["started_at"] = now_iso()
+            self._persist(job)
+            log_file = self.log_path(job["id"])
+            try:
+                with open(log_file, "w") as log:
+                    job["exit_code"] = 0
+                    for argv in steps:
+                        log.write(f"$ {' '.join(argv)}\n")
+                        log.flush()
+                        proc = subprocess.run(
+                            argv, stdout=log, stderr=subprocess.STDOUT,
+                            timeout=self.timeout, env=os.environ,
+                        )
+                        job["exit_code"] = proc.returncode
+                        if proc.returncode != 0:
+                            break
+                    if job["exit_code"] == 0 and post_argv:
+                        log.write(f"\n$ {' '.join(post_argv)}\n")
+                        log.flush()
+                        # Best-effort follow-up (e.g. dev-net attach): failure
+                        # is logged but does not fail the job.
+                        subprocess.run(post_argv, stdout=log,
+                                       stderr=subprocess.STDOUT, timeout=120,
+                                       env=os.environ)
+                if job["exit_code"] == 0:
+                    if job["op"] in ("create", "reset", "start"):
+                        job["result"] = next(
+                            (i for i in list_instances()
+                             if i["name"] == job["instance"]), None)
+                    final = "succeeded"
+                else:
+                    job["error"] = (f"step exited with code "
+                                    f"{job['exit_code']}; see job log")
+                    final = "failed"
+            except subprocess.TimeoutExpired:
+                job["error"] = f"timed out after {self.timeout}s"
+                final = "failed"
+            except Exception as e:
+                job["error"] = str(e)
+                final = "failed"
+            finally:
+                for path in cleanup:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            job["finished_at"] = now_iso()
+            # Status flips to a terminal value only after result/error and
+            # finished_at are in place, so polling clients never see a
+            # half-written "succeeded".
+            job["status"] = final
+            self._persist(job)
+
+
+# --- HTTP API ---------------------------------------------------------------
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "d2-broker"
+    tokens = None
+    jobs = None
+
+    # -- plumbing --
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("%s [%s] %s\n"
+                         % (now_iso(), self.address_string(), fmt % args))
+
+    def send_json(self, status, payload):
+        body = json.dumps(payload, indent=2).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_text(self, status, text):
+        body = text.encode(errors="replace")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def read_body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 65536:
+            raise ApiError(413, "request body too large")
+        if length == 0:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            raise ApiError(400, "request body is not valid JSON")
+
+    def scope(self):
+        """Authenticate and return the token scope ('all' or 'agent').
+
+        Tokens are mandatory for every caller, including localhost: on Docker
+        Desktop for Mac, container connections to host.docker.internal are
+        proxied and arrive FROM 127.0.0.1, so source-IP trust is meaningless.
+        """
+        auth = self.headers.get("Authorization") or ""
+        if auth.startswith("Bearer "):
+            presented = auth[len("Bearer "):].strip()
+            for entry in self.tokens.values():
+                if secrets.compare_digest(presented, entry["token"]):
+                    return entry["scope"]
+        raise ApiError(401, "missing or invalid bearer token")
+
+    def check_name(self, name, scope):
+        if not NAME_RE.match(name):
+            raise ApiError(400, "instance name must match "
+                                "^[a-z][a-z0-9_-]{1,29}$")
+        if scope == "agent" and not name.startswith(AGENT_PREFIX):
+            raise ApiError(403, f"agent tokens may only manage instances "
+                                f"named '{AGENT_PREFIX}*'")
+
+    def check_no_active_job(self, name):
+        active = self.jobs.active_for(name)
+        if active:
+            raise ApiError(409, f"instance '{name}' already has an active "
+                                f"job: {active[0]['id']} ({active[0]['op']})")
+
+    def job_response(self, job):
+        self.send_json(202, {"job": job,
+                             "poll": f"/jobs/{job['id']}",
+                             "log": f"/jobs/{job['id']}/log"})
+
+    # -- routing --
+
+    def route(self, method):
+        url = urlparse(self.path)
+        parts = [p for p in url.path.split("/") if p]
+        query = parse_qs(url.query)
+        try:
+            if method == "GET" and parts == ["health"]:
+                return self.send_json(200, {"status": "ok",
+                                            "service": "d2-broker"})
+            scope = self.scope()
+            handler = getattr(self, f"{method.lower()}_api", None)
+            if handler:
+                return handler(parts, query, scope)
+            raise ApiError(405, "method not allowed")
+        except ApiError as e:
+            self.send_json(e.status, {"error": e.message})
+        except BrokenPipeError:
+            pass
+        except Exception as e:
+            self.send_json(500, {"error": f"internal error: {e}"})
+
+    def do_GET(self):
+        self.route("GET")
+
+    def do_POST(self):
+        self.route("POST")
+
+    def do_DELETE(self):
+        self.route("DELETE")
+
+    # -- GET --
+
+    def get_api(self, parts, query, scope):
+        if parts == ["instances"]:
+            instances = list_instances()
+            if scope == "agent":
+                instances = [i for i in instances if i["agent_managed"]]
+            if query.get("full", ["0"])[0] == "1":
+                for i in instances:
+                    i["dhis2_major_version"] = instance_version(i["name"])
+            return self.send_json(200, {"instances": instances})
+        if parts == ["seeds"]:
+            return self.send_json(200, {"seeds_dir": str(seeds_dir()),
+                                        "seeds": list_seeds(scope)})
+        if parts == ["jobs"]:
+            jobs = self.jobs.list()
+            if scope == "agent":
+                jobs = [j for j in jobs
+                        if j["instance"].startswith(AGENT_PREFIX)]
+            return self.send_json(200, {"jobs": jobs})
+        if len(parts) == 2 and parts[0] == "jobs":
+            return self.get_job(parts[1], scope, log=False)
+        if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "log":
+            return self.get_job(parts[1], scope, log=True)
+        raise ApiError(404, "not found")
+
+    def get_job(self, job_id, scope, log):
+        job = self.jobs.get(job_id)
+        if not job:
+            raise ApiError(404, f"no such job: {job_id}")
+        if scope == "agent" and not job["instance"].startswith(AGENT_PREFIX):
+            raise ApiError(403, "job belongs to a non-agent instance")
+        if log:
+            return self.send_text(200, self.jobs.log_tail(job_id, lines=10000))
+        out = dict(job)
+        out["log_tail"] = self.jobs.log_tail(job_id)
+        return self.send_json(200, out)
+
+    # -- POST --
+
+    def post_api(self, parts, query, scope):
+        if parts == ["instances"]:
+            return self.create_instance(scope)
+        if len(parts) == 3 and parts[0] == "instances":
+            name, action = parts[1], parts[2]
+            self.check_name(name, scope)
+            if action == "reset":
+                return self.reset_instance(name, scope)
+            if action in ("start", "stop"):
+                return self.start_stop(name, action)
+        raise ApiError(404, "not found")
+
+    def create_instance(self, scope):
+        body = self.read_body()
+        name = body.get("name") or ""
+        self.check_name(name, scope)
+        self.check_no_active_job(name)
+
+        if (dhis2_base() / name).exists() or any(
+                i["name"] == name for i in list_instances()):
+            raise ApiError(409, f"instance '{name}' already exists")
+
+        if scope == "agent":
+            existing = [i for i in list_instances() if i["agent_managed"]]
+            cap = int(os.environ.get("D2_BROKER_MAX_AGENT_INSTANCES", 5))
+            if len(existing) >= cap:
+                raise ApiError(409,
+                               f"agent instance cap reached ({cap}); delete "
+                               f"one of: {', '.join(i['name'] for i in existing)}")
+
+        argv = [str(SCRIPT_DIR / "d2-instance-create")]
+        version = body.get("version")
+        if version:
+            if not VERSION_RE.match(str(version)):
+                raise ApiError(400, "version must look like 42, 2.42 or 2.42.1")
+            argv += ["-v", str(version)]
+        if body.get("war_url") or body.get("war_file"):
+            # Arbitrary WAR sources are a supply-chain hole; only the user's
+            # own clients get to use them.
+            if scope != "all":
+                raise ApiError(403, "war_url/war_file require the admin token")
+            if body.get("war_url"):
+                if not str(body["war_url"]).startswith(("http://", "https://")):
+                    raise ApiError(400, "war_url must be http(s)")
+                argv += ["-l", str(body["war_url"])]
+            else:
+                argv += ["-f", str(body["war_file"])]
+        pre_steps, cleanup = [], []
+        if body.get("seed"):
+            seed_path, pre_steps, cleanup = self.prepare_seed(
+                str(body["seed"]), scope)
+            argv += ["-s", seed_path]
+        if body.get("tomcat"):
+            if str(body["tomcat"]) not in ("9", "10"):
+                raise ApiError(400, "tomcat must be 9 or 10")
+            argv += ["-t", str(body["tomcat"])]
+        argv.append(name)
+
+        # The compose template already joins dev-net; the attach is an
+        # idempotent belt-and-braces so the sandbox can always resolve it.
+        attach = [str(SCRIPT_DIR / "d2-dev-net-attach"), name]
+        job = self.jobs.submit("create", name, pre_steps + [argv],
+                               post_argv=attach, cleanup=cleanup)
+        return self.job_response(job)
+
+    def prepare_seed(self, seed, scope):
+        """Resolve a seed reference into (path_for_argv, pre_steps, cleanup).
+        URL seeds (admin only) become a curl download step that runs inside
+        the job, so a multi-GB fetch never blocks the request thread."""
+        path, url = resolve_seed(seed, scope)
+        if not url:
+            return str(path), [], []
+        url_name = Path(urlparse(url).path).name
+        if not url_name.endswith(SEED_SUFFIXES):
+            raise ApiError(400, f"seed URL must end with one of "
+                                f"{SEED_SUFFIXES} so the restore method "
+                                f"can be detected")
+        downloads = broker_dir() / "downloads"
+        downloads.mkdir(exist_ok=True)
+        dest = downloads / f"{secrets.token_hex(4)}-{url_name}"
+        download = ["curl", "-fSL", "--max-time", "3600",
+                    "-o", str(dest), url]
+        return str(dest), [download], [str(dest)]
+
+    def reset_instance(self, name, scope):
+        body = self.read_body()
+        seed = body.get("seed")
+        if not seed:
+            raise ApiError(400, "reset requires a 'seed' (see GET /seeds); to "
+                                "reset to an empty database, delete and "
+                                "re-create the instance instead")
+        self.require_instance(name)
+        self.check_no_active_job(name)
+        seed_path, pre_steps, cleanup = self.prepare_seed(str(seed), scope)
+        argv = [str(SCRIPT_DIR / "d2-db-restore"), name, seed_path]
+        job = self.jobs.submit("reset", name, pre_steps + [argv],
+                               cleanup=cleanup)
+        return self.job_response(job)
+
+    def start_stop(self, name, action):
+        self.require_instance(name)
+        self.check_no_active_job(name)
+        script = "d2-startup" if action == "start" else "d2-shutdown"
+        job = self.jobs.submit(action, name, [[str(SCRIPT_DIR / script), name]])
+        return self.job_response(job)
+
+    def require_instance(self, name):
+        if not (dhis2_base() / name).is_dir():
+            raise ApiError(404, f"instance '{name}' does not exist")
+
+    # -- DELETE --
+
+    def delete_api(self, parts, query, scope):
+        if len(parts) == 2 and parts[0] == "instances":
+            name = parts[1]
+            self.check_name(name, scope)
+            self.require_instance(name)
+            self.check_no_active_job(name)
+            argv = [str(SCRIPT_DIR / "d2-instance-delete"), name]
+            return self.job_response(self.jobs.submit("delete", name, [argv]))
+        raise ApiError(404, "not found")
+
+
+# --- CLI -------------------------------------------------------------------
+
+def cmd_run():
+    tokens = load_or_create_tokens()
+    Handler.tokens = tokens
+    Handler.jobs = JobManager()
+    port = broker_port()
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print(f"d2-broker listening on 0.0.0.0:{port} "
+          f"(DHIS2_BASE={dhis2_base()})", flush=True)
+    print(f"Tokens: {broker_dir() / 'tokens.json'}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_tokens():
+    tokens = load_or_create_tokens()
+    port = broker_port()
+    print(f"Token file: {broker_dir() / 'tokens.json'}  (mode 0600)\n")
+    print(f"admin (full access):       {tokens['admin']['token']}")
+    print(f"agent (agent-* instances): {tokens['agent']['token']}\n")
+    print("Example:")
+    print(f"  curl -H 'Authorization: Bearer {tokens['admin']['token']}' \\")
+    print(f"       http://localhost:{port}/instances")
+    print("\nagent-sandbox.sh picks up the agent token from the token file")
+    print("automatically and passes it into sandboxes as DHIS2_BROKER_TOKEN.")
+
+
+def plist_path():
+    return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+
+
+def cmd_install():
+    load_or_create_tokens()
+    script = Path(__file__).resolve()
+    log = broker_dir() / "broker.log"
+    env_lines = (
+        f"      <key>DHIS2_BASE</key><string>{dhis2_base()}</string>\n"
+        f"      <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:"
+        f"/usr/bin:/bin:/usr/sbin:/sbin</string>\n"
+    )
+    if os.environ.get("D2_BROKER_PORT"):
+        env_lines += (f"      <key>D2_BROKER_PORT</key>"
+                      f"<string>{broker_port()}</string>\n")
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key><string>{LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>{script}</string>
+      <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+{env_lines}    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>{log}</string>
+    <key>StandardErrorPath</key><string>{log}</string>
+  </dict>
+</plist>
+"""
+    path = plist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plist)
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"],
+                   capture_output=True)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(path)],
+                   check=True)
+    print(f"Installed launchd agent {LAUNCHD_LABEL}")
+    print(f"  plist: {path}")
+    print(f"  log:   {log}")
+    print(f"  port:  {broker_port()}")
+
+    # Offer the agent-facing skill to Claude Code (synced into sandboxes by
+    # agent-sandbox sync-skills).
+    skill_src = script.parent.parent / "skills" / "dhis2-instances"
+    skill_dst = Path.home() / ".claude" / "skills" / "dhis2-instances"
+    if skill_src.is_dir() and not skill_dst.exists():
+        skill_dst.parent.mkdir(parents=True, exist_ok=True)
+        skill_dst.symlink_to(skill_src)
+        print(f"  skill: {skill_dst} -> {skill_src}")
+    cmd_status()
+
+
+def cmd_uninstall():
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"],
+                   capture_output=True)
+    path = plist_path()
+    if path.exists():
+        path.unlink()
+    print(f"Removed launchd agent {LAUNCHD_LABEL}")
+
+
+def cmd_status():
+    uid = os.getuid()
+    res = subprocess.run(
+        ["launchctl", "print", f"gui/{uid}/{LAUNCHD_LABEL}"],
+        capture_output=True, text=True)
+    if res.returncode == 0:
+        m = re.search(r"state = (\w+)", res.stdout)
+        print(f"launchd: loaded ({m.group(1) if m else 'unknown state'})")
+    else:
+        print("launchd: not loaded (use 'd2-broker install' or 'd2-broker run')")
+    url = f"http://localhost:{broker_port()}/health"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            print(f"health:  {url} -> {resp.status} {resp.read().decode().strip()}")
+    except Exception as e:
+        print(f"health:  {url} -> unreachable ({e})")
+
+
+def main():
+    commands = {
+        "run": cmd_run,
+        "tokens": cmd_tokens,
+        "install": cmd_install,
+        "uninstall": cmd_uninstall,
+        "status": cmd_status,
+    }
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd not in commands:
+        print(__doc__ or "")
+        print("usage: d2-broker <run|tokens|install|uninstall|status>")
+        sys.exit(1)
+    if cmd != "uninstall":
+        dhis2_base()  # fail fast if DHIS2_BASE is missing
+    commands[cmd]()
+
+
+if __name__ == "__main__":
+    main()
