@@ -52,6 +52,11 @@ is_port_in_use() {
 # Version normalization
 normalize_version() {
   local v="$1"
+  # "2.42" means major 42 — resolve like "42" below. Without this, the X.Y
+  # rule would turn it into the nonsense version "2.2.42".
+  if [[ "$v" =~ ^2\.([0-9]+)$ ]]; then
+    v="${BASH_REMATCH[1]}"
+  fi
   if [[ "$v" =~ ^[0-9]+\.[0-9]+$ ]]; then
     echo "2.${v}"
   elif [[ "$v" =~ ^[0-9]+$ ]]; then

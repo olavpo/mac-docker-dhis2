@@ -28,33 +28,62 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
 
 ## Operations
 
-All mutating calls return **202 with a job**; poll until terminal status
-(`succeeded` / `failed`). Operations are queued globally, one at a time.
+All mutating calls return **202 with a job**; poll until terminal status.
+(Request bodies are parsed as JSON regardless of the Content-Type header,
+so plain `curl -d` works too — don't "fix" calls that omit the header.)
 
 ```bash
-B="$DHIS2_BROKER_URL"; H="Authorization: Bearer $DHIS2_BROKER_TOKEN"
+B="$DHIS2_BROKER_URL"
+H="Authorization: Bearer $DHIS2_BROKER_TOKEN"
+CT="Content-Type: application/json"
 
 # What exists / what seeds are available
 curl -s -H "$H" $B/instances
 curl -s -H "$H" $B/seeds
 
-# Create (version optional — omit both version and seed for an empty shell
-# with no DHIS2 deployed; give "version" to deploy that DHIS2 release)
-curl -s -X POST -H "$H" -d '{"name":"agent-mytest","version":"2.42.4"}' $B/instances
-curl -s -X POST -H "$H" -d '{"name":"agent-mytest","version":"42","seed":"<path from /seeds>"}' $B/instances
+# Create
+curl -s -X POST -H "$H" -H "$CT" -d '{"name":"agent-mytest","version":"42"}' $B/instances
+curl -s -X POST -H "$H" -H "$CT" -d '{"name":"agent-mytest","version":"2.42.4","seed":"<path from /seeds>"}' $B/instances
 
 # Poll the job (id from the 202 response)
 curl -s -H "$H" $B/jobs/<job-id>          # status + log_tail + result
 curl -s -H "$H" $B/jobs/<job-id>/log      # full log, plain text
 
 # Reset the database to a known seed state (Tomcat restarts automatically)
-curl -s -X POST -H "$H" -d '{"seed":"<path from /seeds>"}' $B/instances/agent-mytest/reset
+curl -s -X POST -H "$H" -H "$CT" -d '{"seed":"<path from /seeds>"}' $B/instances/agent-mytest/reset
 
 # Start / stop / delete
-curl -s -X POST -H "$H" -d '{}' $B/instances/agent-mytest/start
-curl -s -X POST -H "$H" -d '{}' $B/instances/agent-mytest/stop
+curl -s -X POST -H "$H" $B/instances/agent-mytest/start
+curl -s -X POST -H "$H" $B/instances/agent-mytest/stop
 curl -s -X DELETE -H "$H" $B/instances/agent-mytest
 ```
+
+**`version` accepts:** a major (`"42"` or `"2.42"` → latest stable of that
+major, resolved from releases.dhis2.org) or an exact release (`"2.42.4"`,
+`"42.4"` also works). Omit it for no DHIS2 at all.
+
+**The three creation states** — pick deliberately:
+
+| Body | Result |
+|---|---|
+| neither `version` nor `seed` | Tomcat + empty Postgres, **no DHIS2 deployed** — a shell, nothing answers on `/api` |
+| `version` only | That DHIS2 release on an empty database (Flyway initializes it; no org units, no metadata, only the admin user) |
+| `version` + `seed` | That release on the seeded database — the usual choice for testing |
+
+`seed` without `version` is valid but rarely useful: the database is
+restored but no DHIS2 webapp is deployed to serve it.
+
+**Polling:** poll `GET /jobs/<id>` every 5–10 s. Jobs run on a single global
+queue, so `queued` can mean "waiting behind someone else's job" — it is not
+a hang. Creates with a `version` download a WAR (hundreds of MB) and seed
+restores can take minutes; expect several minutes end-to-end and don't give
+up early.
+
+**When a job fails** (`status: "failed"`): the `error` field says which step
+exited non-zero; the actual cause is in the output — check `log_tail` in the
+job response first, and fetch `GET /jobs/<id>/log` for the full transcript.
+Fix and retry rather than asking the user, unless the log shows a host-side
+problem (out of disk, Docker down, no free ports).
 
 ## Reaching the instance
 

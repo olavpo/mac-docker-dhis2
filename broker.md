@@ -80,7 +80,9 @@ jobs that were in flight when the broker was restarted.
 ## API
 
 All requests: `Authorization: Bearer <token>`. All responses JSON except
-`/jobs/<id>/log` (plain text).
+`/jobs/<id>/log` (plain text). Request bodies are parsed as JSON regardless
+of the Content-Type header. `version` accepts a major (`42`, `2.42` → latest
+stable resolved from releases.dhis2.org) or an exact release (`2.42.4`).
 
 | Method & path | Description |
 |---|---|
