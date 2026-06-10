@@ -40,7 +40,7 @@
                 autoDeploy="true"
                 deployOnStartup="true"
             >
-                <Context path="" docBase="ROOT/" />
+                <Context path="" docBase="ROOT/" sessionCookieName="JSESSIONID_${INSTANCE_NAME}" />
 
                 <Valve
                     className="org.apache.catalina.valves.AccessLogValve"

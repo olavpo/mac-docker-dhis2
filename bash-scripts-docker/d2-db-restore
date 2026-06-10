@@ -69,8 +69,6 @@ INSTANCE=$1
 DUMP_FILE=$2
 DHIS2_HOME="$DHIS2_BASE/$INSTANCE"
 
-echo "DEBUG: DUMP_FILE=[$DUMP_FILE]"
-
 if [ ! -d "$DHIS2_HOME" ]; then
   echo "Error: Instance $INSTANCE does not exist"
   exit 1

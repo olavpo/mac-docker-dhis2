@@ -33,6 +33,17 @@ services:
       - ./temp:/usr/local/tomcat/temp
       - ./webapps:/usr/local/tomcat/webapps
       - ./server.xml:/usr/local/tomcat/conf/server.xml
+    networks:
+      default: {}
+      dev-net:
+        aliases:
+          - dhis2-${INSTANCE_NAME}
+          - ${INSTANCE_NAME}
+
+networks:
+  default:
+  dev-net:
+    external: true
 
 volumes:
   db_data:

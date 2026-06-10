@@ -23,6 +23,11 @@ fi
 
 INSTANCE=$1
 
+if [ ! -d "$DHIS2_BASE/$INSTANCE" ]; then
+  echo "Error: Instance $INSTANCE does not exist"
+  exit 1
+fi
+
 echo "Starting DHIS2 instance: $INSTANCE"
 cd "$DHIS2_BASE/$INSTANCE"
 docker compose up -d

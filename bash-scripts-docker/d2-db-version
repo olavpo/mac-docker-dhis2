@@ -72,24 +72,17 @@ if ! wait_for_db "$DB_CONTAINER"; then
 fi
 
 # Query the version
-VERSION=$(docker exec "$DB_CONTAINER" psql -U dhis -d dhis2 -t -c "
-  SELECT version FROM flyway_schema_history 
-  ORDER BY version DESC LIMIT 1;
-" 2>/dev/null | tr -d '[:space:]')
+MAJOR_VERSION=$(get_db_major_version "$DB_CONTAINER") || true
 
-if [ -z "$VERSION" ]; then
+if [ -z "$MAJOR_VERSION" ]; then
   echo "ERROR: Could not determine version from database"
   "$SCRIPT_DIR/d2-instance-delete" "$INSTANCE_NAME"
   exit 1
 fi
 
-# Extract major version
-MAJOR_VERSION=$(echo "$VERSION" | cut -d '.' -f 2)
-
 # Clean up
 "$SCRIPT_DIR/d2-instance-delete" "$INSTANCE_NAME"
 
-echo "DHIS2 Version: $VERSION"
 echo "Major Version: $MAJOR_VERSION"
 
 exit 0

@@ -4,8 +4,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# Define script directory for restore hint
+# Load common functions
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/d2-lib.sh"
 
 # Check for required environment variable
 if [ -z "${DHIS2_BASE:-}" ]; then
@@ -37,23 +38,26 @@ fi
 mkdir -p "$BACKUP_DIR"
 
 # Find database container
-if docker ps --format '{{.Names}}' | grep -q "^${INSTANCE}-db-1$"; then
-  DB_CONTAINER="${INSTANCE}-db-1"
-elif docker ps --format '{{.Names}}' | grep -q "^${INSTANCE}_db_1$"; then
-  DB_CONTAINER="${INSTANCE}_db_1"
-else
+DB_CONTAINER=$(resolve_db_container "$INSTANCE") || {
   echo "Error: Database container for instance $INSTANCE not found"
+  exit 1
+}
+
+# resolve_db_container also matches stopped containers; pg_dump needs a
+# running one, and failing mid-pipeline would leave an empty backup file.
+DB_STATUS=$(docker inspect -f '{{.State.Status}}' "$DB_CONTAINER" 2>/dev/null || echo "missing")
+if [ "$DB_STATUS" != "running" ]; then
+  echo "Error: Database container $DB_CONTAINER is not running ($DB_STATUS)"
+  echo "       Start the instance first: d2-startup $INSTANCE"
   exit 1
 fi
 
 # Query database for version to include in filename
-DB_VERSION=$(docker exec "$DB_CONTAINER" psql -U dhis -d dhis2 -t -c "SELECT version FROM flyway_schema_history ORDER BY version DESC LIMIT 1;" 2>/dev/null | tr -d ' ')
+MAJOR_VERSION=$(get_db_major_version "$DB_CONTAINER") || true
 
 # Create backup with timestamp and version
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-if [ -n "$DB_VERSION" ]; then
-  # Extract major version (e.g., 41 from 2.41.7)
-  MAJOR_VERSION=$(echo "$DB_VERSION" | cut -d '.' -f 2)
+if [ -n "$MAJOR_VERSION" ]; then
   BACKUP_FILE="$BACKUP_DIR/${INSTANCE}_${TIMESTAMP}_v${MAJOR_VERSION}.sql.gz"
 else
   BACKUP_FILE="$BACKUP_DIR/${INSTANCE}_${TIMESTAMP}.sql.gz"

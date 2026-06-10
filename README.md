@@ -144,7 +144,6 @@ d2-db-restore myinstance $DHIS2_BASE/_backups/myinstance/myinstance_20240101-120
 
 ```bash
 d2-db-version /path/to/backup.sql.gz
-# DHIS2 Version: 2.41.7
 # Major Version: 41
 ```
 

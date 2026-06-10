@@ -28,8 +28,8 @@ if [ -z "$INSTANCES" ]; then
 fi
 
 # Header
-printf "%-20s %-10s %-10s %-10s %-15s\n" "Instance" "HTTP Port" "PG Port" "Version" "Status"
-echo "----------------------------------------------------------------------"
+printf "%-20s %-10s %-10s %-10s %-12s %-22s\n" "Instance" "HTTP Port" "PG Port" "Version" "Status" "dev-net host"
+echo "--------------------------------------------------------------------------------------------------"
 
 for INSTANCE in $INSTANCES; do
   # Get container names using helper functions
@@ -43,13 +43,13 @@ for INSTANCE in $INSTANCES; do
   
   # Get host-facing ports (extract from 0.0.0.0:HOST_PORT)
   if [ -n "$TOMCAT_CONTAINER" ]; then
-    HTTP_PORT=$(docker port "$TOMCAT_CONTAINER" 8080/tcp 2>/dev/null | sed 's/.*:\([0-9]*\)$/\1/' || echo "-")
+    HTTP_PORT=$(docker port "$TOMCAT_CONTAINER" 8080/tcp 2>/dev/null | grep -m1 '0\.0\.0\.0:' | sed 's/.*:\([0-9]*\)$/\1/' || echo "-")
   else
     HTTP_PORT="-"
   fi
   
   if [ -n "$DB_CONTAINER" ]; then
-    PG_PORT=$(docker port "$DB_CONTAINER" 5432/tcp 2>/dev/null | sed 's/.*:\([0-9]*\)$/\1/' || echo "-")
+    PG_PORT=$(docker port "$DB_CONTAINER" 5432/tcp 2>/dev/null | grep -m1 '0\.0\.0\.0:' | sed 's/.*:\([0-9]*\)$/\1/' || echo "-")
   else
     PG_PORT="-"
   fi
@@ -57,11 +57,7 @@ for INSTANCE in $INSTANCES; do
   # Get DHIS2 version (major version only)
   VERSION="-"
   if [ -n "$DB_CONTAINER" ] && docker ps -a --format '{{.Names}}' | grep -q "^$DB_CONTAINER$"; then
-    FULL_VERSION=$(docker exec "$DB_CONTAINER" psql -U dhis -d dhis2 -t -c "SELECT version FROM flyway_schema_history ORDER BY version DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')
-    if [ -n "$FULL_VERSION" ]; then
-      # Extract major version (e.g., 41 from 2.41.7)
-      VERSION=$(echo "$FULL_VERSION" | cut -d '.' -f 2)
-    fi
+    VERSION=$(get_db_major_version "$DB_CONTAINER") || VERSION="-"
   fi
   
   # Get status
@@ -75,9 +71,18 @@ for INSTANCE in $INSTANCES; do
   else
     STATUS="Stopped"
   fi
-  
+
+  # Check whether tomcat is attached to the dev-net network
+  DEVNET_HOST="-"
+  if [ -n "$TOMCAT_CONTAINER" ]; then
+    if docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' \
+         "$TOMCAT_CONTAINER" 2>/dev/null | grep -qw "dev-net"; then
+      DEVNET_HOST="dhis2-$INSTANCE"
+    fi
+  fi
+
   # Output row
-  printf "%-20s %-10s %-10s %-10s %-15s\n" "$INSTANCE" "$HTTP_PORT" "$PG_PORT" "$VERSION" "$STATUS"
+  printf "%-20s %-10s %-10s %-10s %-12s %-22s\n" "$INSTANCE" "$HTTP_PORT" "$PG_PORT" "$VERSION" "$STATUS" "$DEVNET_HOST"
 done
 
 echo ""

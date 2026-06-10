@@ -60,7 +60,6 @@ fi
 INSTANCE=$1
 DHIS2_HOME="$DHIS2_BASE/$INSTANCE"
 
-echo "DEBUG: WAR_FILE=[$WAR_FILE], WAR_URL=[$WAR_URL], VERSION=[$VERSION], HTTP_PORT=[$HTTP_PORT]"
 
 # Check if instance exists
 if [ ! -d "$DHIS2_HOME" ]; then
@@ -90,9 +89,9 @@ if [ -n "$WAR_FILE" ]; then
   cp "$WAR_FILE" "$TEMP_WAR"
 elif [ -n "$WAR_URL" ]; then
   if command -v wget >/dev/null 2>&1; then
-    wget -O "$TEMP_WAR" "$WAR_URL" >/dev/null 2>&1
+    wget -nv -O "$TEMP_WAR" "$WAR_URL"
   elif command -v curl >/dev/null 2>&1; then
-    curl -L -o "$TEMP_WAR" "$WAR_URL" >/dev/null 2>&1
+    curl -fSL --no-progress-meter -o "$TEMP_WAR" "$WAR_URL"
   else
     echo "Error: Neither wget nor curl found for downloading"
     exit 1
@@ -117,9 +116,9 @@ elif [ -n "$VERSION" ]; then
   DOWNLOAD_URL="https://releases.dhis2.org/2.$MAJOR/dhis2-stable-$FULL_VERSION.war"
   echo "Downloading from: $DOWNLOAD_URL"
   if command -v wget >/dev/null 2>&1; then
-    wget -O "$TEMP_WAR" "$DOWNLOAD_URL" >/dev/null 2>&1
+    wget -nv -O "$TEMP_WAR" "$DOWNLOAD_URL"
   elif command -v curl >/dev/null 2>&1; then
-    curl -L -o "$TEMP_WAR" "$DOWNLOAD_URL" >/dev/null 2>&1
+    curl -fSL --no-progress-meter -o "$TEMP_WAR" "$DOWNLOAD_URL"
   else
     echo "Error: Neither wget nor curl found for downloading"
     exit 1

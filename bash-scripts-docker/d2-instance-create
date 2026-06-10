@@ -15,7 +15,11 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/d2-lib.sh"
 
-
+# Check for required environment variable
+if [ -z "${DHIS2_BASE:-}" ]; then
+  echo "Error: DHIS2_BASE environment variable not set"
+  exit 1
+fi
 
 usage() {
   echo "Usage: $0 [options] <instance name>"
@@ -76,18 +80,6 @@ fi
 
 INSTANCE=$1
 DHIS2_HOME="$DHIS2_BASE/$INSTANCE"
-
-# Show configuration for this deployment
-echo "WAR_FILE=$WAR_FILE"
-echo "WAR_URL=$WAR_URL"
-echo "DB_SEED=$DB_SEED"
-echo "VERSION=$VERSION"
-echo "HTTP_PORT=$HTTP_PORT"
-echo "PG_PORT=$PG_PORT"
-echo "TOMCAT_VERSION=$TOMCAT_VERSION"
-echo ""
-
-
 
 
 
@@ -161,7 +153,7 @@ echo "  PostgreSQL Port: $PG_PORT"
 # Copy template files
 cp "${DHIS2_BASE}/_templates/dhis.conf" "$DHIS2_HOME/DHIS2_HOME/dhis.conf"
 cp "${DHIS2_BASE}/_templates/log4j2.xml" "$DHIS2_HOME/DHIS2_HOME/log4j2.xml"
-cp "${DHIS2_BASE}/_templates/server.xml" "$DHIS2_HOME/server.xml"
+sed "s/\${INSTANCE_NAME}/$INSTANCE/g" "${DHIS2_BASE}/_templates/server.xml" > "$DHIS2_HOME/server.xml"
 
 # Select appropriate template based on Tomcat version
 if [ "$TOMCAT_VERSION" = "9" ]; then
@@ -171,17 +163,29 @@ else
 fi
 
 # Create docker-compose.yml from selected template
-sed "s/\${PG_PORT:-5432}/$PG_PORT/g; s/\${HTTP_PORT:-8080}/$HTTP_PORT/g" \
+sed "s/\${PG_PORT:-5432}/$PG_PORT/g; \
+     s/\${HTTP_PORT:-8080}/$HTTP_PORT/g; \
+     s/\${INSTANCE_NAME}/$INSTANCE/g" \
   "$TEMPLATE_FILE" > "$DHIS2_HOME/docker-compose.yml"
 
+# Ensure the shared dev-net network exists (used to expose this instance to
+# agent sandboxes and other containers by hostname). Safe to run repeatedly.
+docker network create dev-net >/dev/null 2>&1 || true
 
 # Start the instance
 cd "$DHIS2_HOME"
 docker compose up -d
 
-# Wait for containers to be ready
-echo "Waiting for containers to initialize..."
-sleep 15
+# Wait for database to be ready
+echo "Waiting for database to be ready..."
+DB_CONTAINER=$(resolve_db_container "$INSTANCE") || {
+  echo "Error: Database container not found after startup"
+  exit 1
+}
+if ! wait_for_db "$DB_CONTAINER"; then
+  echo "Error: Database did not become ready in time"
+  exit 1
+fi
 
 # Deploy WAR file and/or restore database if specified
 if [ -n "$WAR_FILE" ] || [ -n "$WAR_URL" ] || [ -n "$VERSION" ] || [ -n "$DB_SEED" ]; then
@@ -211,8 +215,9 @@ fi
 # Final output
 echo ""
 echo "✅ DHIS2 instance $INSTANCE created successfully with Tomcat $TOMCAT_DISPLAY"
-echo "  Access: http://localhost:$HTTP_PORT"
-echo "  PostgreSQL: localhost:$PG_PORT (user: dhis, password: dhis, db: dhis2)"
-echo "  DHIS2_HOME: $DHIS2_HOME/DHIS2_HOME/"
+echo "  Access:       http://localhost:$HTTP_PORT"
+echo "  dev-net:      http://dhis2-$INSTANCE:8080 (reachable from containers on dev-net)"
+echo "  PostgreSQL:   localhost:$PG_PORT (user: dhis, password: dhis, db: dhis2)"
+echo "  DHIS2_HOME:   $DHIS2_HOME/DHIS2_HOME/"
 
 

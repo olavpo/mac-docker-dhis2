@@ -1,0 +1,59 @@
+#!/bin/bash
+#       ____  __  ______________
+#      / __ \/ / / /  _/ ___/__ \
+#     / / / / /_/ // / \__ \__/ /
+#    / /_/ / __  // / ___/ / __/
+#   /_____/_/ /_/___//____/____/
+#
+#   Retrofit an existing DHIS2 instance onto the shared `dev-net` bridge so
+#   sibling containers (agent sandboxes, MCP servers, etc.) can reach it by
+#   hostname. New instances created with d2-instance-create already attach
+#   via the compose template; this script is for instances created before
+#   the dev-net change, or after `docker compose down` re-created without it.
+#
+#   Aliases applied on dev-net: `dhis2-<instance>` and `<instance>`.
+
+set -euo pipefail
+IFS=$'\n\t'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/d2-lib.sh"
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: d2-dev-net-attach <instance name>"
+  exit 1
+fi
+
+INSTANCE=$1
+
+TOMCAT_CONTAINER=$(resolve_tomcat_container "$INSTANCE") || {
+  echo "Error: Tomcat container for instance '$INSTANCE' not found."
+  echo "       Is the instance created and running?"
+  exit 1
+}
+
+# Ensure the network exists.
+docker network create dev-net >/dev/null 2>&1 || true
+
+# Skip if already attached.
+if docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' \
+     "$TOMCAT_CONTAINER" | grep -qw "dev-net"; then
+  echo "✅ $TOMCAT_CONTAINER is already attached to dev-net."
+  echo "   Reachable at: http://dhis2-$INSTANCE:8080"
+  exit 0
+fi
+
+docker network connect \
+  --alias "dhis2-$INSTANCE" \
+  --alias "$INSTANCE" \
+  dev-net "$TOMCAT_CONTAINER"
+
+echo "✅ $TOMCAT_CONTAINER attached to dev-net."
+echo "   Reachable at: http://dhis2-$INSTANCE:8080"
+echo ""
+echo "Note: this attachment lasts for the lifetime of the container. If you"
+echo "run \`docker compose down\` and re-create from an old docker-compose.yml"
+echo "(one written before the dev-net change), you'll need to re-run this"
+echo "script. To make it permanent, re-create the instance with the latest"
+echo "d2-instance-create, or hand-edit docker-compose.yml to add the dev-net"
+echo "block from the template."

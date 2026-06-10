@@ -38,10 +38,12 @@ abspath() {
 # Port checking
 is_port_in_use() {
   local port="$1"
-  if command -v ss >/dev/null 2>&1; then
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -iTCP:"$port" -sTCP:LISTEN -n -P >/dev/null 2>&1
+  elif command -v ss >/dev/null 2>&1; then
     ss -tuln | grep -q ":$port "
   elif command -v netstat >/dev/null 2>&1; then
-    netstat -tuln 2>/dev/null | grep -q ":$port "
+    netstat -an 2>/dev/null | grep -q "[.:]$port "
   else
     return 1
   fi
@@ -68,6 +70,18 @@ normalize_version() {
     echo "$v"
   fi
 }
+
+# Get DHIS2 major version from flyway_schema_history (e.g. "41" from "2.41.7")
+get_db_major_version() {
+  local db_container="$1"
+  local full_version
+  full_version=$(docker exec "$db_container" psql -U dhis -d dhis2 -t -c \
+    "SELECT version FROM flyway_schema_history ORDER BY installed_rank DESC LIMIT 1;" \
+    2>/dev/null | tr -d '[:space:]')
+  [ -n "$full_version" ] || return 1
+  echo "$full_version" | cut -d '.' -f 2
+}
+
 
 # Database readiness check
 wait_for_db() {
