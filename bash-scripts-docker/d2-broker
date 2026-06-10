@@ -661,7 +661,19 @@ class Handler(BaseHTTPRequestHandler):
         self.require_instance(name)
         self.check_no_active_job(name)
         script = "d2-startup" if action == "start" else "d2-shutdown"
-        job = self.jobs.submit(action, name, [[str(SCRIPT_DIR / script), name]])
+        # The DB's dev-net membership comes from `docker network connect`,
+        # which does not survive `docker compose down` re-creating the
+        # container (Tomcat's does — it's in the compose template). Re-attach
+        # on every start so devnet_db keeps working across stop/start cycles.
+        post_cmds = []
+        if action == "start":
+            post_cmds = [
+                [str(SCRIPT_DIR / "d2-dev-net-attach"), name],
+                ["docker", "network", "connect", "--alias",
+                 f"dhis2-{name}-db", "dev-net", f"{name}-db-1"],
+            ]
+        job = self.jobs.submit(action, name, [[str(SCRIPT_DIR / script), name]],
+                               post_cmds=post_cmds)
         return self.job_response(job)
 
     def require_instance(self, name):
