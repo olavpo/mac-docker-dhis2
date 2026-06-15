@@ -15,10 +15,20 @@ if [ -z "${DHIS2_BASE:-}" ]; then
 fi
 
 usage() {
-  echo "Usage: $0 <instance name>"
+  echo "Usage: $0 [-l <label>] <instance name>"
   echo "Creates a timestamped database backup in the common [Backups] directory"
+  echo "  -l <label>   optional tag folded into the backup filename"
   exit 1
 }
+
+LABEL=""
+while getopts "l:" opt; do
+  case $opt in
+    l) LABEL=$OPTARG ;;
+    *) usage ;;
+  esac
+done
+shift $((OPTIND-1))
 
 if [ $# -eq 0 ]; then
   usage
@@ -55,12 +65,16 @@ fi
 # Query database for version to include in filename
 MAJOR_VERSION=$(get_db_major_version "$DB_CONTAINER") || true
 
-# Create backup with timestamp and version
+# Create backup with timestamp, version, and optional label
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+SUFFIX=""
+if [ -n "$LABEL" ]; then
+  SUFFIX="_${LABEL}"
+fi
 if [ -n "$MAJOR_VERSION" ]; then
-  BACKUP_FILE="$BACKUP_DIR/${INSTANCE}_${TIMESTAMP}_v${MAJOR_VERSION}.sql.gz"
+  BACKUP_FILE="$BACKUP_DIR/${INSTANCE}_${TIMESTAMP}_v${MAJOR_VERSION}${SUFFIX}.sql.gz"
 else
-  BACKUP_FILE="$BACKUP_DIR/${INSTANCE}_${TIMESTAMP}.sql.gz"
+  BACKUP_FILE="$BACKUP_DIR/${INSTANCE}_${TIMESTAMP}${SUFFIX}.sql.gz"
 fi
 
 echo "Creating backup of $INSTANCE database..."
