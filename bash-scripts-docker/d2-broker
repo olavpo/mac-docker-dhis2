@@ -649,6 +649,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.start_stop(name, action)
             if action == "backup":
                 return self.backup_instance(name, scope)
+            if action == "upgrade":
+                return self.upgrade_instance(name, scope)
         raise ApiError(404, "not found")
 
     def create_instance(self, scope):
@@ -760,6 +762,54 @@ class Handler(BaseHTTPRequestHandler):
             argv += ["-l", str(label)]
         argv.append(name)
         return self.job_response(self.jobs.submit("backup", name, [argv]))
+
+    def upgrade_instance(self, name, scope):
+        body = self.read_body()
+        self.require_instance(name)
+        self.check_no_active_job(name)
+        version = body.get("version")
+        war_url = body.get("war_url")
+        war_file = body.get("war_file")
+        provided = [s for s in (version, war_url, war_file) if s]
+        if len(provided) != 1:
+            raise ApiError(400, "upgrade requires exactly one of: "
+                                "version, war_url, war_file")
+
+        deploy = [str(SCRIPT_DIR / "d2-deploy-war")]
+        if version:
+            if not VERSION_RE.match(str(version)):
+                raise ApiError(400, "version must look like 42, 2.42 or 2.42.1")
+            cur = instance_version(name)
+            cur_major = int(cur) if cur and cur.isdigit() else None
+            err = transition_error(cur_major, extract_target_major(version))
+            if err:
+                raise ApiError(400, err)
+            deploy += ["-v", str(version)]
+        elif war_url:
+            if scope != "all":
+                raise ApiError(403, "war_url/war_file require the admin token")
+            if not str(war_url).startswith(("http://", "https://")):
+                raise ApiError(400, "war_url must be http(s)")
+            deploy += ["-l", str(war_url)]
+        else:  # war_file
+            if scope != "all":
+                raise ApiError(403, "war_url/war_file require the admin token")
+            deploy += ["-f", str(war_file)]
+
+        tomcat = body.get("tomcat")
+        if tomcat is not None:
+            if str(tomcat) not in ("9", "10"):
+                raise ApiError(400, "tomcat must be 9 or 10")
+            if current_tomcat_major(name) != int(tomcat):
+                raise ApiError(400, "changing the servlet container is not "
+                                    "yet supported")
+        deploy.append(name)
+
+        steps = []
+        if body.get("backup_first", True):
+            steps.append([str(SCRIPT_DIR / "d2-db-backup"), name])
+        steps.append(deploy)
+        return self.job_response(self.jobs.submit("upgrade", name, steps))
 
     def start_stop(self, name, action):
         self.require_instance(name)
