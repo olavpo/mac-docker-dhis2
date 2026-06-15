@@ -140,8 +140,11 @@ def container_networks(container):
 
 
 def list_instances():
-    """Mirror of d2-info: find <name>(-|_)tomcat(-|_)1 containers, collect
-    ports, state, and dev-net reachability for each."""
+    """Enumerate instances by directory (the source of truth for existence, as
+    in require_instance) and derive status from their <name>(-|_)tomcat(-|_)1 /
+    db containers. Directory-based so an instance stopped via `docker compose
+    down` — which removes its containers — still appears, as 'stopped', rather
+    than vanishing from the list until it is started again."""
     names = run_out(["docker", "ps", "-a", "--format", "{{.Names}}"]).split()
     tomcats = {}
     dbs = {}
@@ -153,10 +156,21 @@ def list_instances():
         if m:
             dbs[m.group(1)] = n
 
+    # Instance set: directories under DHIS2_BASE (skip _-prefixed reserved dirs
+    # like _broker/_seeds/_backups), unioned with any name that has a container
+    # but somehow no directory.
+    inst_names = set(tomcats)
+    base = dhis2_base()
+    if base.is_dir():
+        for p in base.iterdir():
+            if p.is_dir() and not p.name.startswith("_") and NAME_RE.match(p.name):
+                inst_names.add(p.name)
+
     instances = []
-    for inst, tomcat in sorted(tomcats.items()):
+    for inst in sorted(inst_names):
+        tomcat = tomcats.get(inst)
         db = dbs.get(inst)
-        t_state = container_state(tomcat)
+        t_state = container_state(tomcat) if tomcat else "missing"
         d_state = container_state(db) if db else "missing"
         if t_state == "running" and d_state == "running":
             status = "running"
@@ -164,9 +178,9 @@ def list_instances():
             status = "partial"
         else:
             status = "stopped"
-        http_port = container_port(tomcat, "8080/tcp")
+        http_port = container_port(tomcat, "8080/tcp") if tomcat else None
         pg_port = container_port(db, "5432/tcp") if db else None
-        on_devnet = "dev-net" in container_networks(tomcat)
+        on_devnet = bool(tomcat) and "dev-net" in container_networks(tomcat)
         db_on_devnet = bool(db) and "dev-net" in container_networks(db)
         instances.append({
             "name": inst,
