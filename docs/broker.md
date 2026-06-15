@@ -1,8 +1,9 @@
 # d2-broker — HTTP API for DHIS2 instance management
 
 `d2-broker` is a small HTTP service that wraps the `d2-*` scripts so other
-clients can create, reset, start/stop and delete DHIS2 Docker instances on
-this machine without shell access. Current and intended clients:
+clients can create, reset, start/stop, back up, upgrade and delete DHIS2
+Docker instances on this machine without shell access. Current and intended
+clients:
 
 - **AI agent sandboxes** ([ai-agentic-sandbox](https://github.com/olavpo/ai-agentic-sandbox))
   reach it at `http://host.docker.internal:9300` with a restricted token.
@@ -54,13 +55,18 @@ trust cannot distinguish the sandbox from your own curl:
 
 - **admin** (`scope: all`) — full access. For the user's own clients.
 - **agent** (`scope: agent`) — for AI agents. Restricted to:
-  - instances named `agent-*` only (create/reset/start/stop/delete/list);
-    it can never touch your own instances;
+  - instances named `agent-*` only (create/reset/start/stop/upgrade/delete/
+    list); it can never touch your own instances;
   - seeds from the **curated `$DHIS2_BASE/_seeds/` directory only** — agents
     can never restore real-data backups (`_backups/` is admin-only), pass
     arbitrary host paths, or download from URLs;
   - no custom WARs (`war_url` / `war_file` are admin-only); versions come
-    from releases.dhis2.org via `d2-deploy-war -v`;
+    from releases.dhis2.org via `d2-deploy-war -v`. Upgrades are limited to
+    the `version` form for the same reason;
+  - **no backups** — `POST /instances/<name>/backup` is admin-only (`_backups/`
+    is admin territory); agents get a clean slate via seeds/reset instead, and
+    an agent `upgrade` silently skips its `backup_first` step for the same
+    reason;
   - at most `D2_BROKER_MAX_AGENT_INSTANCES` instances at a time.
 
 **Fixed verb set.** The broker only ever executes the sibling `d2-*` scripts
@@ -76,8 +82,9 @@ initializes an empty database via Flyway on first start.
 
 ## Jobs
 
-Create, reset, start, stop and delete all return **202 with a job**, because
-the underlying operations range from seconds (stop) to hours (large restore).
+Create, reset, start, stop, delete, backup and upgrade all return **202 with
+a job**, because the underlying operations range from seconds (stop) to hours
+(large restore).
 Poll `GET /jobs/<id>` until `status` is terminal. Jobs run on a **single
 worker, globally serialized** — deliberate, since `d2-instance-create`
 auto-selects free ports by scanning, so concurrent creates could collide.
@@ -101,6 +108,8 @@ stable resolved from releases.dhis2.org) or an exact release (`2.42.4`).
 | `POST /instances/<name>/start` | `docker compose up -d` → 202 job |
 | `POST /instances/<name>/stop` | `docker compose down` → 202 job |
 | `DELETE /instances/<name>` | Stop, remove containers+volumes, delete dir → 202 job |
+| `POST /instances/<name>/backup`†| `pg_dump` the DB to `_backups/<name>/`. Body: `{"label"?}` → 202 job. Requires a running DB. `result` is a `GET /seeds` entry |
+| `POST /instances/<name>/upgrade` | Swap the WAR, preserving DB+volumes. Body: `{"version" \| "war_url"† \| "war_file"†, "tomcat"?, "backup_first"?}` → 202 job. Rejects downgrades, major-skips, and Tomcat changes |
 | `GET /seeds` | Seeds available to this token (agent: `_seeds/`; admin: also `backups/...`) |
 | `GET /jobs` | Recent jobs (agent scope: `agent-*` jobs only) |
 | `GET /jobs/<id>` | Job status incl. `log_tail` and, on success, `result` (instance info) |
@@ -140,12 +149,15 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" \
 curl -s -X DELETE -H "Authorization: Bearer $TOKEN" $B/instances/agent-test1
 ```
 
-On success, a create/reset/start job's `result` carries the instance info,
-including `devnet_url` (`http://dhis2-<name>:8080`, reachable from containers
-on the `dev-net` Docker network), `devnet_db` (`dhis2-<name>-db:5432`,
+On success, a create/reset/start/upgrade job's `result` carries the instance
+info, including `devnet_url` (`http://dhis2-<name>:8080`, reachable from
+containers on the `dev-net` Docker network), `devnet_db` (`dhis2-<name>-db:5432`,
 PostgreSQL `dhis`/`dhis`/`dhis2` — the broker attaches the DB container of
 created instances to dev-net as a debugging side-door), and `localhost_url`
-(host browser; not reachable from inside containers).
+(host browser; not reachable from inside containers). An `upgrade` result adds
+a best-effort `dhis2_major_version` (it may still read the pre-upgrade major
+until Flyway finishes migrating — re-poll `GET /instances?full=1`). A `backup`
+job's `result` is instead the new backup's `GET /seeds` entry.
 
 ## Sandbox integration (ai-agentic-sandbox)
 
