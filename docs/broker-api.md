@@ -6,8 +6,8 @@ build a client against. Read it first if you are wiring up a menu bar app,
 web dashboard, Electron/Tauri shell, or any other client that talks to
 `d2-broker`.
 
-The broker source is `bash-scripts-docker/d2-broker` (845 lines, Python 3,
-stdlib only); this document tracks what it actually does.
+The broker source is `bash-scripts-docker/d2-broker` (Python 3, stdlib
+only); this document tracks what it actually does.
 
 ---
 
@@ -335,14 +335,16 @@ whose `instance` starts with `agent-`.
   "finished_at": null,
   "exit_code":   null,
   "error":       null,
-  "result":      null,                   // populated on success for create/reset/start
+  "result":      null,                   // on success: GET /instances element (create/reset/start/upgrade) or GET /seeds element (backup)
   "log_tail":    "...last 20 lines of subprocess output..."
 }
 ```
 
 `log_tail` is appended to the job object on the single-job endpoint only
 (not on `GET /jobs`). On `succeeded`, `result` for `create` / `reset` /
-`start` is the same shape as a `GET /instances` element.
+`start` / `upgrade` is the same shape as a `GET /instances` element
+(`upgrade` adds a best-effort `dhis2_major_version`); for `backup` it is a
+`GET /seeds` element.
 
 ### `GET /jobs/<id>/log`
 
