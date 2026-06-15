@@ -212,6 +212,17 @@ def instance_version(name):
     return None
 
 
+def extract_target_major(version):
+    """DHIS2 major from a version string: '42'/'2.42'/'2.42.4' -> 42.
+    Returns None if the major is not numeric."""
+    parts = str(version).split(".")
+    major = parts[1] if parts[0] == "2" and len(parts) >= 2 else parts[0]
+    try:
+        return int(major)
+    except ValueError:
+        return None
+
+
 def _scan_dump_files(root, source):
     if not root.is_dir():
         return []
