@@ -6,6 +6,7 @@ Run: python3 -m unittest test_d2_broker -v   (from bash-scripts-docker/)
 import importlib.util
 import importlib.machinery
 import os
+import tempfile
 import unittest
 from datetime import timezone
 from pathlib import Path
@@ -65,6 +66,31 @@ class ParseTomcatMajor(unittest.TestCase):
 
     def test_no_match(self):
         self.assertIsNone(broker.parse_tomcat_major("postgis:16-3.5"))
+
+
+class DumpElement(unittest.TestCase):
+    def test_backups_path_prefixed_and_relative(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            f = root / "agent-x" / "agent-x_20260614-091401_v42.sql.gz"
+            f.parent.mkdir(parents=True)
+            f.write_bytes(b"hello")
+            elem = broker.dump_element(f, "backups", root)
+            self.assertEqual(
+                elem["path"],
+                "backups/agent-x/agent-x_20260614-091401_v42.sql.gz")
+            self.assertEqual(elem["source"], "backups")
+            self.assertEqual(elem["size_bytes"], 5)
+            self.assertTrue(elem["modified"].endswith("+00:00"))
+
+    def test_seeds_path_not_prefixed(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            f = root / "demo.sql.gz"
+            f.write_bytes(b"x")
+            elem = broker.dump_element(f, "seeds", root)
+            self.assertEqual(elem["path"], "demo.sql.gz")
+            self.assertEqual(elem["source"], "seeds")
 
 
 if __name__ == "__main__":

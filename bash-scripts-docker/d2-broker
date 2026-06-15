@@ -258,21 +258,26 @@ def current_tomcat_major(name):
     return None
 
 
+def dump_element(path, source, root):
+    """Build a GET /seeds-shaped element for a dump file under `root`.
+    Backup sources get a 'backups/' path prefix."""
+    prefix = "backups/" if source == "backups" else ""
+    st = path.stat()
+    return {
+        "path": prefix + str(path.relative_to(root)),
+        "source": source,
+        "size_bytes": st.st_size,
+        "modified": datetime.fromtimestamp(
+            st.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
 def _scan_dump_files(root, source):
     if not root.is_dir():
         return []
-    found = []
-    for p in sorted(root.rglob("*")):
-        if p.is_file() and p.name.endswith(SEED_SUFFIXES):
-            prefix = "backups/" if source == "backups" else ""
-            found.append({
-                "path": prefix + str(p.relative_to(root)),
-                "source": source,
-                "size_bytes": p.stat().st_size,
-                "modified": datetime.fromtimestamp(
-                    p.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"),
-            })
-    return found
+    return [dump_element(p, source, root)
+            for p in sorted(root.rglob("*"))
+            if p.is_file() and p.name.endswith(SEED_SUFFIXES)]
 
 
 def list_seeds(scope):
