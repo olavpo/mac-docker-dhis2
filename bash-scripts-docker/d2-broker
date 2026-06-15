@@ -448,10 +448,24 @@ class JobManager:
                                            stderr=subprocess.STDOUT,
                                            timeout=120, env=os.environ)
                 if job["exit_code"] == 0:
-                    if job["op"] in ("create", "reset", "start"):
-                        job["result"] = next(
+                    if job["op"] in ("create", "reset", "start", "upgrade"):
+                        elem = next(
                             (i for i in list_instances()
                              if i["name"] == job["instance"]), None)
+                        if elem and job["op"] == "upgrade":
+                            elem["dhis2_major_version"] = instance_version(
+                                job["instance"])
+                        job["result"] = elem
+                    elif job["op"] == "backup":
+                        root = backups_dir() / job["instance"]
+                        dumps = sorted(
+                            (p for p in root.rglob("*")
+                             if p.is_file()
+                             and p.name.endswith(SEED_SUFFIXES)),
+                            key=lambda p: p.stat().st_mtime)
+                        job["result"] = (
+                            dump_element(dumps[-1], "backups", backups_dir())
+                            if dumps else None)
                     final = "succeeded"
                 else:
                     job["error"] = (f"step exited with code "
@@ -633,6 +647,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reset_instance(name, scope)
             if action in ("start", "stop"):
                 return self.start_stop(name, action)
+            if action == "backup":
+                return self.backup_instance(name, scope)
         raise ApiError(404, "not found")
 
     def create_instance(self, scope):
@@ -728,6 +744,22 @@ class Handler(BaseHTTPRequestHandler):
         job = self.jobs.submit("reset", name, pre_steps + [argv],
                                cleanup=cleanup)
         return self.job_response(job)
+
+    def backup_instance(self, name, scope):
+        if scope != "all":
+            raise ApiError(403, "backups require the admin token")
+        body = self.read_body()
+        label = body.get("label")
+        self.require_instance(name)
+        self.check_no_active_job(name)
+        argv = [str(SCRIPT_DIR / "d2-db-backup")]
+        if label is not None:
+            if not re.match(r"^[a-z0-9][a-z0-9_-]{0,39}$", str(label)):
+                raise ApiError(400, "label must match "
+                                    "^[a-z0-9][a-z0-9_-]{0,39}$")
+            argv += ["-l", str(label)]
+        argv.append(name)
+        return self.job_response(self.jobs.submit("backup", name, [argv]))
 
     def start_stop(self, name, action):
         self.require_instance(name)
