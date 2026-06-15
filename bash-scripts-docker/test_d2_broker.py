@@ -53,5 +53,19 @@ class TransitionError(unittest.TestCase):
         self.assertIsNone(broker.transition_error(None, 42))
 
 
+class ParseTomcatMajor(unittest.TestCase):
+    def test_tomcat_10(self):
+        self.assertEqual(broker.parse_tomcat_major("tomcat:10-jdk17"), 10)
+
+    def test_tomcat_9(self):
+        self.assertEqual(broker.parse_tomcat_major("tomcat:9.0-jdk17"), 9)
+
+    def test_empty(self):
+        self.assertIsNone(broker.parse_tomcat_major(""))
+
+    def test_no_match(self):
+        self.assertIsNone(broker.parse_tomcat_major("postgis:16-3.5"))
+
+
 if __name__ == "__main__":
     unittest.main()

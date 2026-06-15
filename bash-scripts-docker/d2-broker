@@ -239,6 +239,25 @@ def transition_error(current_major, target_major):
     return None
 
 
+def parse_tomcat_major(image):
+    """Tomcat major from a container image tag, e.g.
+    'tomcat:10-jdk17' -> 10, 'tomcat:9.0-jdk17' -> 9. None if not found."""
+    m = re.search(r"tomcat:(\d+)", image or "")
+    return int(m.group(1)) if m else None
+
+
+def current_tomcat_major(name):
+    """The Tomcat major of the instance's running/created container, or
+    None if it can't be determined."""
+    for c in (f"{name}-tomcat-1", f"{name}_tomcat_1"):
+        out = run_out(["docker", "inspect", "-f",
+                       "{{.Config.Image}}", c]).strip()
+        major = parse_tomcat_major(out)
+        if major is not None:
+            return major
+    return None
+
+
 def _scan_dump_files(root, source):
     if not root.is_dir():
         return []
