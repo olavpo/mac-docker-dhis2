@@ -86,13 +86,13 @@ path** (e.g. "does this metadata survive a 2.41 → 2.42 upgrade"). If you just
 need an instance at version X, create one at X — don't create-then-upgrade.
 For your token: only the `version` form works (`war_url`/`war_file` are
 admin-only → 403), and only same-major or one-major-up is allowed (downgrades
-and skips → 400). **Pass `"backup_first": false`** — it defaults to `true`,
-which writes a pre-upgrade dump into `_backups/<name>/`, but that directory is
-admin-only so you can't read the dump back; it's wasted work and disk for you.
-The job `result` carries a best-effort `dhis2_major_version` that may still
-show the old major until migrations finish — confirm the upgrade landed by
-polling `GET /instances?full=1` (or `/api/system/info`) until it reports the
-new version.
+and skips → 400). The pre-upgrade backup (`backup_first`) is skipped
+automatically for your token — it would land in admin-only `_backups/`, which
+you can't read back — so there's no safety net: if an upgrade breaks the
+instance, delete and re-create. The job `result` carries a best-effort
+`dhis2_major_version` that may still show the old major until migrations
+finish — confirm the upgrade landed by polling `GET /instances?full=1` (or
+`/api/system/info`) until it reports the new version.
 
 **Polling:** poll `GET /jobs/<id>` every 5–10 s. Jobs run on a single global
 queue, so `queued` can mean "waiting behind someone else's job" — it is not

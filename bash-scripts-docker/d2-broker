@@ -806,7 +806,10 @@ class Handler(BaseHTTPRequestHandler):
         deploy.append(name)
 
         steps = []
-        if body.get("backup_first", True):
+        # backup_first defaults on, but the dump lands in admin-only
+        # _backups/; agent tokens can't read it back, so skip it for them
+        # (keeps the admin-only backup boundary consistent with POST /backup).
+        if scope == "all" and body.get("backup_first", True):
             steps.append([str(SCRIPT_DIR / "d2-db-backup"), name])
         steps.append(deploy)
         return self.job_response(self.jobs.submit("upgrade", name, steps))
