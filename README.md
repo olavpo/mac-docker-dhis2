@@ -130,6 +130,9 @@ Backup:
 ```bash
 d2-db-backup myinstance
 # writes to: $DHIS2_BASE/_backups/myinstance/<timestamp>_vXX.sql.gz
+
+d2-db-backup -l pre-upgrade myinstance
+# optional label folded into the name: myinstance_<timestamp>_vXX_pre-upgrade.sql.gz
 ```
 
 Restore:

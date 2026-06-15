@@ -25,6 +25,9 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
   backups, host files, or URLs — don't ask the broker to; it will refuse.
 - There is a cap on concurrent `agent-*` instances. Delete instances you no
   longer need.
+- **Backups are admin-only**: `POST /instances/<name>/backup` returns `403`
+  for your token (`_backups/` is the user's territory). To get clean or known
+  state, reset from a seed or delete and re-create — don't try to back up.
 
 ## Operations
 
@@ -56,6 +59,9 @@ curl -s -X POST -H "$H" -H "$CT" -d '{"seed":"<path from /seeds>"}' $B/instances
 curl -s -X POST -H "$H" $B/instances/agent-mytest/start
 curl -s -X POST -H "$H" $B/instances/agent-mytest/stop
 curl -s -X DELETE -H "$H" $B/instances/agent-mytest
+
+# Upgrade in place — swap the WAR, keep the database (see note below)
+curl -s -X POST -H "$H" -H "$CT" -d '{"version":"2.42"}' $B/instances/agent-mytest/upgrade
 ```
 
 **`version` accepts:** a major (`"42"` or `"2.42"` → latest stable of that
@@ -72,6 +78,21 @@ major, resolved from releases.dhis2.org) or an exact release (`"2.42.4"`,
 
 `seed` without `version` is valid but rarely useful: the database is
 restored but no DHIS2 webapp is deployed to serve it.
+
+**Upgrading an instance** (`POST /instances/<name>/upgrade`): swaps the WAR
+while keeping the database and volumes, then lets Flyway migrate on boot.
+**Only reach for this when the task is specifically about an upgrade/migration
+path** (e.g. "does this metadata survive a 2.41 → 2.42 upgrade"). If you just
+need an instance at version X, create one at X — don't create-then-upgrade.
+For your token: only the `version` form works (`war_url`/`war_file` are
+admin-only → 403), and only same-major or one-major-up is allowed (downgrades
+and skips → 400). **Pass `"backup_first": false`** — it defaults to `true`,
+which writes a pre-upgrade dump into `_backups/<name>/`, but that directory is
+admin-only so you can't read the dump back; it's wasted work and disk for you.
+The job `result` carries a best-effort `dhis2_major_version` that may still
+show the old major until migrations finish — confirm the upgrade landed by
+polling `GET /instances?full=1` (or `/api/system/info`) until it reports the
+new version.
 
 **Polling:** poll `GET /jobs/<id>` every 5–10 s. Jobs run on a single global
 queue, so `queued` can mean "waiting behind someone else's job" — it is not
