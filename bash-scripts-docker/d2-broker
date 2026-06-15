@@ -223,6 +223,22 @@ def extract_target_major(version):
         return None
 
 
+def transition_error(current_major, target_major):
+    """Message for an unsupported DHIS2 version transition, else None.
+    Only enforced when both majors are known; downgrades and major-skips
+    are rejected, same-major and +1 are allowed."""
+    if current_major is None or target_major is None:
+        return None
+    if target_major < current_major:
+        return (f"downgrade not supported: instance is on DHIS2 "
+                f"{current_major}, requested {target_major}")
+    if target_major > current_major + 1:
+        return (f"skipping major versions not supported: instance is on "
+                f"DHIS2 {current_major}, requested {target_major} "
+                f"(upgrade one major at a time)")
+    return None
+
+
 def _scan_dump_files(root, source):
     if not root.is_dir():
         return []

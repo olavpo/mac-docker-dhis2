@@ -32,5 +32,26 @@ class ExtractTargetMajor(unittest.TestCase):
         self.assertIsNone(broker.extract_target_major(""))
 
 
+class TransitionError(unittest.TestCase):
+    def test_same_major_ok(self):
+        self.assertIsNone(broker.transition_error(42, 42))
+
+    def test_one_up_ok(self):
+        self.assertIsNone(broker.transition_error(41, 42))
+
+    def test_downgrade_rejected(self):
+        msg = broker.transition_error(42, 41)
+        self.assertIsNotNone(msg)
+        self.assertIn("downgrade", msg)
+
+    def test_major_skip_rejected(self):
+        msg = broker.transition_error(42, 44)
+        self.assertIsNotNone(msg)
+        self.assertIn("skipping", msg)
+
+    def test_unknown_current_skips_guard(self):
+        self.assertIsNone(broker.transition_error(None, 42))
+
+
 if __name__ == "__main__":
     unittest.main()
