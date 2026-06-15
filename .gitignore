@@ -1,0 +1,6 @@
+# Python bytecode cache (e.g. from running the d2-broker unit tests)
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
