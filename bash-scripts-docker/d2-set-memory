@@ -1,0 +1,66 @@
+#!/bin/bash
+#       ____  __  ______________
+#      / __ \/ / / /  _/ ___/__ \
+#     / / / / /_/ // / \__ \__/ /
+#    / /_/ / __  // / ___/ / __/
+#   /_____/_/ /_/___/____/____/
+#
+#   Set the Tomcat max heap (-Xmx) for an existing DHIS2 instance and
+#   recreate its Tomcat container. Database and volumes are preserved.
+
+set -euo pipefail
+IFS=$'\n\t'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/d2-lib.sh"
+
+if [ -z "${DHIS2_BASE:-}" ]; then
+  echo "Error: DHIS2_BASE environment variable not set"
+  exit 1
+fi
+
+usage() {
+  echo "Usage: $0 <instance name> <size>"
+  echo "Sets the Tomcat max heap (-Xmx) and recreates the Tomcat container."
+  echo "  <size>   e.g. 512m, 2g (matches ^[0-9]+[mMgG]\$)"
+  exit 1
+}
+
+if [ $# -ne 2 ]; then
+  usage
+fi
+
+INSTANCE=$1
+SIZE=$2
+DHIS2_HOME="$DHIS2_BASE/$INSTANCE"
+
+if [ ! -d "$DHIS2_HOME" ]; then
+  echo "Error: Instance $INSTANCE does not exist"
+  exit 1
+fi
+
+if ! echo "$SIZE" | grep -qE '^[0-9]+[mMgG]$'; then
+  echo "Error: size must match ^[0-9]+[mMgG]\$ (e.g. 512m, 2g)"
+  exit 1
+fi
+
+COMPOSE="$DHIS2_HOME/docker-compose.yml"
+if [ ! -f "$COMPOSE" ]; then
+  echo "Error: $COMPOSE not found"
+  exit 1
+fi
+
+# Rewrite the CATALINA_OPTS line: drop any existing -Xmx token, then append the
+# new one before the line's closing quote. Temp-file (not sed -i) for macOS/
+# Linux portability. Assumes CATALINA_OPTS is a single double-quoted string
+# ending its line (true for the compose templates).
+TMP=$(mktemp)
+sed -E "/CATALINA_OPTS:/{s/ -Xmx[0-9]+[mMgGkK]?//g;s/\"\$/ -Xmx${SIZE}\"/;}" \
+  "$COMPOSE" > "$TMP"
+mv "$TMP" "$COMPOSE"
+
+echo "Set Tomcat heap for $INSTANCE to -Xmx$SIZE; recreating container..."
+cd "$DHIS2_HOME"
+docker compose up -d
+
+echo "✅ Tomcat heap for $INSTANCE is now -Xmx$SIZE"
