@@ -84,6 +84,7 @@ All scripts are in `bash-scripts-docker/` and expect:
 
 - **Application & info**
   - `d2-deploy-war` — deploy a WAR by version, URL, or local file
+  - `d2-set-memory` — set the Tomcat max heap (`-Xmx`) on an instance + recreate Tomcat
   - `d2-info` — list instances, ports, DB version, and status
   - `d2-logtail` — `docker logs -f` for Tomcat
 
@@ -101,6 +102,8 @@ All scripts are in `bash-scripts-docker/` and expect:
 d2-instance-create -v 2.42.4 -p 9010 -g 5433 myinstance
 # Access: http://localhost:9010
 # DB: localhost:5433 (user: dhis, password: dhis, db: dhis2)
+
+d2-instance-create -v 2.42 -m 6g myinstance   # 6 GB max heap (default is 4g)
 ```
 
 If you omit `-p` / `-g`, ports are auto‑selected.

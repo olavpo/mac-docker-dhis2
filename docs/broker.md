@@ -34,6 +34,8 @@ launchd plist):
 | `D2_BROKER_BIND` | `127.0.0.1` | Bind address — loopback-only by default; see below |
 | `D2_BROKER_MAX_AGENT_INSTANCES` | `5` | Cap on concurrent `agent-*` instances |
 | `D2_BROKER_JOB_TIMEOUT` | `7200` | Per-job timeout, seconds |
+| `D2_DEFAULT_MEMORY` | `4g` | Default Tomcat max heap for new instances (`d2-instance-create`) |
+| `D2_BROKER_MAX_AGENT_MEMORY` | `8g` | Max heap an agent token may request |
 
 State lives in `$DHIS2_BASE/_broker/`: `tokens.json` (mode 0600),
 `broker.log`, `jobs/<id>.json` + `jobs/<id>.log`, `downloads/` (temporary
@@ -67,6 +69,8 @@ trust cannot distinguish the sandbox from your own curl:
     is admin territory); agents get a clean slate via seeds/reset instead, and
     an agent `upgrade` silently skips its `backup_first` step for the same
     reason;
+  - may set the Tomcat heap (`memory` on create, `POST .../memory`), but only
+    up to `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`);
   - at most `D2_BROKER_MAX_AGENT_INSTANCES` instances at a time.
 
 **Fixed verb set.** The broker only ever executes the sibling `d2-*` scripts
@@ -103,13 +107,14 @@ stable resolved from releases.dhis2.org) or an exact release (`2.42.4`).
 |---|---|
 | `GET /health` | Liveness (no auth) |
 | `GET /instances[?full=1]` | List instances (agent scope: `agent-*` only). `full=1` adds `dhis2_major_version` (slower) |
-| `POST /instances` | Create. Body: `{"name", "version"?, "seed"?, "tomcat"?, "war_url"?†, "war_file"?†}` → 202 job |
+| `POST /instances` | Create. Body: `{"name", "version"?, "seed"?, "tomcat"?, "memory"?, "war_url"?†, "war_file"?†}` → 202 job |
 | `POST /instances/<name>/reset` | Restore DB from a seed. Body: `{"seed"}` → 202 job |
 | `POST /instances/<name>/start` | `docker compose up -d` → 202 job |
 | `POST /instances/<name>/stop` | `docker compose down` → 202 job |
 | `DELETE /instances/<name>` | Stop, remove containers+volumes, delete dir → 202 job |
 | `POST /instances/<name>/backup`†| `pg_dump` the DB to `_backups/<name>/`. Body: `{"label"?}` → 202 job. Requires a running DB. `result` is a `GET /seeds` entry |
 | `POST /instances/<name>/upgrade` | Swap the WAR, preserving DB+volumes. Body: `{"version" \| "war_url"† \| "war_file"†, "tomcat"?, "backup_first"?}` → 202 job. Rejects downgrades, major-skips, and Tomcat changes |
+| `POST /instances/<name>/memory` | Set Tomcat max heap (`-Xmx`) + recreate Tomcat. Body: `{"memory"}` → 202 job |
 | `GET /seeds` | Seeds available to this token (agent: `_seeds/`; admin: also `backups/...`) |
 | `GET /jobs` | Recent jobs (agent scope: `agent-*` jobs only) |
 | `GET /jobs/<id>` | Job status incl. `log_tail` and, on success, `result` (instance info) |

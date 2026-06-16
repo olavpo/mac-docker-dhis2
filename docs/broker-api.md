@@ -174,6 +174,7 @@ Body:
   "version": "2.42.4",           // optional; latest stable if you pass "42" or "2.42"
   "seed": "sl-demo-v42.sql.gz",  // optional; see Seed forms below
   "tomcat": "10",                // optional; "9" or "10", default "10"
+  "memory": "4g",                // optional; Tomcat max heap (-Xmx), default 4g
   "war_url":  "https://...",     // optional; admin only
   "war_file": "/abs/path.war"    // optional; admin only
 }
@@ -186,6 +187,9 @@ Validation:
 - `version` matches `^[0-9][0-9.]{0,15}$`. Major-only forms (`42`, `2.42`)
   resolve to the latest stable from `releases.dhis2.org` at job-run time.
 - `tomcat` is the string `"9"` or `"10"`.
+- `memory` matches `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`); default `4g` when
+  omitted. Agent scope: heap above `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`)
+  → `400`.
 - `war_url` must be `http://` or `https://`.
 - Agent scope:
   - `war_url` / `war_file` → `403`.
@@ -288,6 +292,22 @@ On success, `result` is the `GET /instances` element with a best-effort
 this may still read the pre-upgrade major; re-poll `GET /instances?full=1`
 once the instance is back up to observe the migrated version.
 
+### `POST /instances/<name>/memory`
+
+Set the Tomcat max heap (`-Xmx`) on an existing instance and recreate the
+Tomcat container (DB and volumes preserved). Returns **202 + job**.
+
+Body:
+
+```json
+{ "memory": "2g" }   // required; matches ^[0-9]+[mMgG]$
+```
+
+- `memory` is required; `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`).
+- Agent scope: heap above `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`) → `400`.
+- `result` on success is the `GET /instances` element (like `start`). The
+  instance restarts as Tomcat is recreated.
+
 ### `GET /seeds`
 
 ```json
@@ -327,7 +347,7 @@ whose `instance` starts with `agent-`.
 ```json
 {
   "id": "j-1a2b3c4d",
-  "op": "create",                        // create | reset | start | stop | delete | backup | upgrade
+  "op": "create",                        // create | reset | start | stop | delete | backup | upgrade | memory
   "instance": "agent-test1",
   "status": "running",                   // queued | running | succeeded | failed | interrupted
   "created_at":  "2026-06-13T09:14:01+00:00",
@@ -381,6 +401,7 @@ detected from the suffix.
 | Seed filename | ends with `.sql`, `.sql.gz`, or `.pgc` |
 | `label` (backup) | `^[a-z0-9][a-z0-9_-]{0,39}$` |
 | `backup_first` | boolean, default `true` |
+| `memory` | `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`); agent heap capped by `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`) |
 
 Show validation errors from the broker verbatim — they are concise and
 already user-facing.

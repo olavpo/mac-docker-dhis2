@@ -62,6 +62,9 @@ curl -s -X DELETE -H "$H" $B/instances/agent-mytest
 
 # Upgrade in place — swap the WAR, keep the database (see note below)
 curl -s -X POST -H "$H" -H "$CT" -d '{"version":"2.42"}' $B/instances/agent-mytest/upgrade
+
+# Change the Tomcat heap (recreates Tomcat; DB preserved)
+curl -s -X POST -H "$H" -H "$CT" -d '{"memory":"2g"}' $B/instances/agent-mytest/memory
 ```
 
 **`version` accepts:** a major (`"42"` or `"2.42"` → latest stable of that
@@ -93,6 +96,13 @@ instance, delete and re-create. The job `result` carries a best-effort
 `dhis2_major_version` that may still show the old major until migrations
 finish — confirm the upgrade landed by polling `GET /instances?full=1` (or
 `/api/system/info`) until it reports the new version.
+
+**Memory / heap**: instances default to `-Xmx4g`. Set a different heap at
+create with `"memory":"2g"` in the body, or change it later with
+`POST /instances/<name>/memory` `{"memory":"2g"}` (recreates Tomcat — a brief
+restart; DB preserved). Your token is capped by `D2_BROKER_MAX_AGENT_MEMORY`
+(default `8g`); a larger request returns `400`. Size format: `^[0-9]+[mMgG]$`
+(e.g. `512m`, `2g`).
 
 **Polling:** poll `GET /jobs/<id>` every 5–10 s. Jobs run on a single global
 queue, so `queued` can mean "waiting behind someone else's job" — it is not
