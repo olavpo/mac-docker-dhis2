@@ -708,6 +708,9 @@ class Handler(BaseHTTPRequestHandler):
             if str(body["tomcat"]) not in ("9", "10"):
                 raise ApiError(400, "tomcat must be 9 or 10")
             argv += ["-t", str(body["tomcat"])]
+        if body.get("memory"):
+            self.validate_memory(body["memory"], scope)
+            argv += ["-m", str(body["memory"])]
         argv.append(name)
 
         # The compose template already joins dev-net for Tomcat; the attach
@@ -742,6 +745,17 @@ class Handler(BaseHTTPRequestHandler):
         download = ["curl", "-fSL", "--max-time", "3600",
                     "-o", str(dest), url]
         return str(dest), [download], [str(dest)]
+
+    def validate_memory(self, memory, scope):
+        """Validate a heap size and enforce the agent cap. Raises ApiError."""
+        if not MEMORY_RE.match(str(memory)):
+            raise ApiError(400, "memory must match ^[0-9]+[mMgG]$ "
+                                "(e.g. 512m, 2g)")
+        if scope != "all":
+            cap = os.environ.get("D2_BROKER_MAX_AGENT_MEMORY", "8g")
+            if mem_to_mb(str(memory)) > mem_to_mb(cap):
+                raise ApiError(400, f"requested heap {memory} exceeds the "
+                                    f"agent cap ({cap})")
 
     def reset_instance(self, name, scope):
         body = self.read_body()
