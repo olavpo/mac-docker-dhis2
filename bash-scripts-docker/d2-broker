@@ -58,6 +58,7 @@ AGENT_PREFIX = "agent-"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,29}$")
 VERSION_RE = re.compile(r"^[0-9][0-9.]{0,15}$")
+MEMORY_RE = re.compile(r"^[0-9]+[mMgG]$")
 SEED_SUFFIXES = (".sql", ".sql.gz", ".pgc")
 
 
@@ -221,6 +222,16 @@ def extract_target_major(version):
         return int(major)
     except ValueError:
         return None
+
+
+def mem_to_mb(size):
+    """Heap size string ('512m', '2g') to megabytes (int). None if
+    unparseable. Only m/g (case-insensitive) are accepted."""
+    m = re.match(r"^([0-9]+)([mMgG])$", str(size))
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n * 1024 if m.group(2) in "gG" else n
 
 
 def transition_error(current_major, target_major):

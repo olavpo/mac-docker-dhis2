@@ -93,5 +93,33 @@ class DumpElement(unittest.TestCase):
             self.assertEqual(elem["source"], "seeds")
 
 
+class MemToMb(unittest.TestCase):
+    def test_megabytes(self):
+        self.assertEqual(broker.mem_to_mb("512m"), 512)
+
+    def test_gigabytes(self):
+        self.assertEqual(broker.mem_to_mb("2g"), 2048)
+
+    def test_four_g(self):
+        self.assertEqual(broker.mem_to_mb("4g"), 4096)
+
+    def test_uppercase_unit(self):
+        self.assertEqual(broker.mem_to_mb("1G"), 1024)
+
+    def test_unparseable_returns_none(self):
+        for bad in ("", "4", "4gb", "abc", "4k", "2.5g"):
+            self.assertIsNone(broker.mem_to_mb(bad))
+
+
+class MemoryRe(unittest.TestCase):
+    def test_matches(self):
+        for good in ("512m", "2g", "4096m", "1G", "8M"):
+            self.assertIsNotNone(broker.MEMORY_RE.match(good))
+
+    def test_rejects(self):
+        for bad in ("", "4", "4gb", "4k", "2.5g", " 2g"):
+            self.assertIsNone(broker.MEMORY_RE.match(bad))
+
+
 if __name__ == "__main__":
     unittest.main()
