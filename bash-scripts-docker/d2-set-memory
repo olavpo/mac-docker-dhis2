@@ -55,9 +55,16 @@ fi
 # Linux portability. Assumes CATALINA_OPTS is a single double-quoted string
 # ending its line (true for the compose templates).
 TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
 sed -E "/CATALINA_OPTS:/{s/ -Xmx[0-9]+[mMgGkK]?//g;s/\"\$/ -Xmx${SIZE}\"/;}" \
   "$COMPOSE" > "$TMP"
 mv "$TMP" "$COMPOSE"
+
+# Guard against a silent no-op if the CATALINA_OPTS format ever changes.
+if ! grep -q "CATALINA_OPTS:.*-Xmx${SIZE}" "$COMPOSE"; then
+  echo "Error: failed to set -Xmx$SIZE in $COMPOSE (unexpected CATALINA_OPTS format)"
+  exit 1
+fi
 
 echo "Set Tomcat heap for $INSTANCE to -Xmx$SIZE; recreating container..."
 cd "$DHIS2_HOME"

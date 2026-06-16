@@ -756,7 +756,11 @@ class Handler(BaseHTTPRequestHandler):
                                 "(e.g. 512m, 2g)")
         if scope != "all":
             cap = os.environ.get("D2_BROKER_MAX_AGENT_MEMORY", "8g")
-            if mem_to_mb(str(memory)) > mem_to_mb(cap):
+            cap_mb = mem_to_mb(cap)
+            if cap_mb is None:
+                raise ApiError(500, f"D2_BROKER_MAX_AGENT_MEMORY is "
+                                    f"misconfigured: {cap!r}")
+            if mem_to_mb(str(memory)) > cap_mb:
                 raise ApiError(400, f"requested heap {memory} exceeds the "
                                     f"agent cap ({cap})")
 
