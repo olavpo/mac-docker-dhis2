@@ -459,7 +459,8 @@ class JobManager:
                                            stderr=subprocess.STDOUT,
                                            timeout=120, env=os.environ)
                 if job["exit_code"] == 0:
-                    if job["op"] in ("create", "reset", "start", "upgrade"):
+                    if job["op"] in ("create", "reset", "start", "upgrade",
+                                     "memory"):
                         elem = next(
                             (i for i in list_instances()
                              if i["name"] == job["instance"]), None)
@@ -662,6 +663,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.backup_instance(name, scope)
             if action == "upgrade":
                 return self.upgrade_instance(name, scope)
+            if action == "memory":
+                return self.set_memory_instance(name, scope)
         raise ApiError(404, "not found")
 
     def create_instance(self, scope):
@@ -838,6 +841,17 @@ class Handler(BaseHTTPRequestHandler):
             steps.append([str(SCRIPT_DIR / "d2-db-backup"), name])
         steps.append(deploy)
         return self.job_response(self.jobs.submit("upgrade", name, steps))
+
+    def set_memory_instance(self, name, scope):
+        body = self.read_body()
+        memory = body.get("memory")
+        if not memory:
+            raise ApiError(400, 'memory is required (e.g. {"memory":"2g"})')
+        self.validate_memory(memory, scope)
+        self.require_instance(name)
+        self.check_no_active_job(name)
+        argv = [str(SCRIPT_DIR / "d2-set-memory"), name, str(memory)]
+        return self.job_response(self.jobs.submit("memory", name, [argv]))
 
     def start_stop(self, name, action):
         self.require_instance(name)
