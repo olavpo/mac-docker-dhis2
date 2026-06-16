@@ -31,6 +31,7 @@ usage() {
   echo "  -g <port>       PostgreSQL port (default: auto-select 5433-5999)"
   echo "  -f <war_file>   Custom WAR file to deploy"
   echo "  -t <version>    Tomcat version: 9 or 10 (default: 10)"
+  echo "  -m <size>       Java max heap, e.g. 2g (default: 4g / \$D2_DEFAULT_MEMORY)"
   echo "Example: $0 -v 2.42.4 -p 9006 -g 5433 myinstance"
   echo "Example with URL: $0 -l https://example.com/custom.war -p 9006 myinstance"
   echo "Example with custom WAR: $0 -f /path/to/custom.war -p 9006 myinstance"
@@ -48,9 +49,11 @@ HTTP_PORT=""
 PG_PORT=""
 WAR_FILE=""
 TOMCAT_VERSION="10"  # Default to Tomcat 10
+MEMORY=""
+DEFAULT_MEMORY="${D2_DEFAULT_MEMORY:-4g}"  # Tomcat max heap when -m omitted
 
 # Parse options
-while getopts "v:l:s:p:g:f:t:" opt; do
+while getopts "v:l:s:p:g:f:t:m:" opt; do
   case $opt in
     v) VERSION=$OPTARG ;;
     l) WAR_URL=$OPTARG ;;
@@ -59,6 +62,7 @@ while getopts "v:l:s:p:g:f:t:" opt; do
     g) PG_PORT=$OPTARG ;;
     f) WAR_FILE=$OPTARG ;;
     t) TOMCAT_VERSION=$OPTARG ;;
+    m) MEMORY=$OPTARG ;;
     *) usage ;;
   esac
 done
@@ -77,6 +81,14 @@ fi
 if [ -n "$DB_SEED" ]; then
   DB_SEED=$(abspath "$DB_SEED")
 fi
+
+# Resolve and validate the Tomcat max heap (default 4g; see D2_DEFAULT_MEMORY)
+MEMORY="${MEMORY:-$DEFAULT_MEMORY}"
+if ! echo "$MEMORY" | grep -qE '^[0-9]+[mMgG]$'; then
+  echo "Error: -m memory must match ^[0-9]+[mMgG]\$ (e.g. 512m, 2g)"
+  exit 1
+fi
+JAVA_MEM_OPTS=" -Xmx${MEMORY}"
 
 INSTANCE=$1
 DHIS2_HOME="$DHIS2_BASE/$INSTANCE"
@@ -149,6 +161,7 @@ echo "  DHIS2 Version: ${VERSION:-None}"
 echo "  Tomcat Version: $TOMCAT_DISPLAY"
 echo "  HTTP Port: $HTTP_PORT"
 echo "  PostgreSQL Port: $PG_PORT"
+echo "  Tomcat heap:     -Xmx$MEMORY"
 
 # Copy template files
 cp "${DHIS2_BASE}/_templates/dhis.conf" "$DHIS2_HOME/DHIS2_HOME/dhis.conf"
@@ -165,6 +178,7 @@ fi
 # Create docker-compose.yml from selected template
 sed "s/\${PG_PORT:-5432}/$PG_PORT/g; \
      s/\${HTTP_PORT:-8080}/$HTTP_PORT/g; \
+     s/\${JAVA_MEM_OPTS}/$JAVA_MEM_OPTS/g; \
      s/\${INSTANCE_NAME}/$INSTANCE/g" \
   "$TEMPLATE_FILE" > "$DHIS2_HOME/docker-compose.yml"
 
