@@ -80,6 +80,12 @@ fi
 echo "Creating backup of $INSTANCE database..."
 echo "Backup will be saved to: $BACKUP_FILE"
 
+# Strip the known-password local_admin superuser from the dump so it never
+# lands in a backup; always re-add it afterward (even if the dump fails).
+"$SCRIPT_DIR/d2-local-admin" "$INSTANCE" remove \
+  || echo "⚠️  Warning: could not remove local_admin; dump may contain it"
+trap '"$SCRIPT_DIR/d2-local-admin" "$INSTANCE" add >/dev/null 2>&1 || true' EXIT
+
 # Dump database and compress
 docker exec "$DB_CONTAINER" pg_dump -U dhis -d dhis2 | gzip > "$BACKUP_FILE"
 
