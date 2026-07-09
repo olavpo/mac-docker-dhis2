@@ -236,6 +236,8 @@ def mem_to_mb(size):
 
 def valid_port(n):
     """True iff n is an integer host port in [1024, 65535]."""
+    if isinstance(n, float) and not n.is_integer():
+        return False  # a fractional port like 9010.5 is not a valid port
     try:
         p = int(n)
     except (TypeError, ValueError):

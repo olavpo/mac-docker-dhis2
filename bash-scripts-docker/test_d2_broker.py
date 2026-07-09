@@ -127,7 +127,7 @@ class ValidPort(unittest.TestCase):
             self.assertTrue(broker.valid_port(p), p)
 
     def test_invalid(self):
-        for p in (1023, 70000, 0, "abc", None, "80.5", ""):
+        for p in (1023, 70000, 0, "abc", None, "80.5", "", 9010.5):
             self.assertFalse(broker.valid_port(p), p)
 
 
