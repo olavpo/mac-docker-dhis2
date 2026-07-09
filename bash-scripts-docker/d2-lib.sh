@@ -76,6 +76,26 @@ normalize_version() {
   fi
 }
 
+# DHIS2 major from a version string: 42, 2.42, 2.42.4, 41.4 -> 42 / 41.
+dhis2_major() {
+  local v="$1"
+  if [[ "$v" =~ ^2\.([0-9]+) ]]; then
+    echo "${BASH_REMATCH[1]}"        # strip a leading "2." (the DHIS2 2.x line)
+  else
+    echo "${v%%.*}"                  # first dot-separated component
+  fi
+}
+
+# Tomcat major required by a DHIS2 major: <=41 -> 9, else 10.
+required_tomcat_for_major() {
+  local major="$1"
+  if [[ "$major" =~ ^[0-9]+$ ]] && [ "$major" -le 41 ]; then
+    echo 9
+  else
+    echo 10
+  fi
+}
+
 # Get DHIS2 major version from flyway_schema_history (e.g. "41" from "2.41.7")
 get_db_major_version() {
   local db_container="$1"
