@@ -28,6 +28,9 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
 - **Backups are admin-only**: `POST /instances/<name>/backup` returns `403`
   for your token (`_backups/` is the user's territory). To get clean or known
   state, reset from a seed or delete and re-create — don't try to back up.
+- **Don't set `tomcat` when you pass a `version`** — the broker auto-selects the
+  compatible Tomcat (DHIS2 ≤ 2.41 needs Tomcat 9, ≥ 2.42 needs Tomcat 10). A
+  conflicting `tomcat` makes the create job fail.
 
 ## Operations
 

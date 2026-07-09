@@ -104,6 +104,8 @@ d2-instance-create -v 2.42.4 -p 9010 -g 5433 myinstance
 # DB: localhost:5433 (user: dhis, password: dhis, db: dhis2)
 
 d2-instance-create -v 2.42 -m 6g myinstance   # 6 GB max heap (default is 4g)
+
+d2-instance-create -v 2.41 myinstance   # Tomcat auto-selected (2.41 -> Tomcat 9)
 ```
 
 If you omit `-p` / `-g`, ports are auto‑selected.

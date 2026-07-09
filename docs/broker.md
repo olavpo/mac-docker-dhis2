@@ -122,6 +122,9 @@ stable resolved from releases.dhis2.org) or an exact release (`2.42.4`).
 
 † admin token only.
 
+`tomcat` is optional and auto-selected from `version` (DHIS2 ≤ 2.41 → Tomcat 9,
+≥ 2.42 → Tomcat 10); a `tomcat` that conflicts with `version` fails the job.
+
 `seed` accepts, by scope:
 
 | Form | Example | Who |

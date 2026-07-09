@@ -173,7 +173,7 @@ Body:
   "name": "agent-test1",         // required
   "version": "2.42.4",           // optional; latest stable if you pass "42" or "2.42"
   "seed": "sl-demo-v42.sql.gz",  // optional; see Seed forms below
-  "tomcat": "10",                // optional; "9" or "10", default "10"
+  "tomcat": "10",                // optional; "9"/"10". Auto-selected from version if omitted
   "memory": "4g",                // optional; Tomcat max heap (-Xmx), default 4g
   "war_url":  "https://...",     // optional; admin only
   "war_file": "/abs/path.war"    // optional; admin only
@@ -187,6 +187,8 @@ Validation:
 - `version` matches `^[0-9][0-9.]{0,15}$`. Major-only forms (`42`, `2.42`)
   resolve to the latest stable from `releases.dhis2.org` at job-run time.
 - `tomcat` is the string `"9"` or `"10"`.
+- `tomcat` is auto-selected from `version` when omitted (DHIS2 ≤ 2.41 → `9`,
+  ≥ 2.42 → `10`). Passing a `tomcat` that conflicts with `version` fails the job.
 - `memory` matches `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`); default `4g` when
   omitted. Agent scope: heap above `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`)
   → `400`.
@@ -440,7 +442,8 @@ For the activity drawer / job feed:
 
 For creation:
 
-- Default `tomcat` to `"10"` and let advanced users override.
+- Leave `tomcat` unset when you pass a `version` — the broker auto-selects the
+  compatible Tomcat. Only set it for the no-version (empty-instance) case.
 - Show recent versions as suggestions but allow free-text entry (because
   major-only resolves at job-run time).
 - Show available seeds from `GET /seeds`; include "No seed (empty
