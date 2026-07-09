@@ -124,6 +124,14 @@ fi
 
 and the PG block is the same shape (`seq 5433 5999`, "PostgreSQL"/"5433-5999"). Both run before the instance-exists check, `mkdir`, and `docker compose up`.
 
+> **Note for the implementer:** the quoted "current" blocks above are for
+> orientation only — the live file has minor whitespace (a blank line with
+> trailing spaces between `done` and the `if [ -z … ]` check) that won't match a
+> literal find/replace. Read the actual block (e.g. `sed -n '116,160p'
+> bash-scripts-docker/d2-instance-create`) and replace the real `if [ -z
+> "$HTTP_PORT" ]; then … fi` / `if [ -z "$PG_PORT" ]; then … fi` blocks with the
+> new versions below (whole-block replacement, not line-by-line).
+
 - [ ] **Step 1: Replace the HTTP block** with:
 
 ```bash
