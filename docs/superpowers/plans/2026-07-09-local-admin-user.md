@@ -367,9 +367,9 @@ git commit -m "feat(backup): strip local_admin from dumps (remove -> dump -> re-
 - Modify: `bash-scripts-docker/d2-instance-create`
 
 - [ ] **Step 1: After an empty (version, no seed) create finishes, ensure
-local_admin via SQL once DHIS2 has booted.** Read the live file; find the tail
-where deployment is done (after the WAR/DB block, near the final success echo).
-Add:
+local_admin via SQL once DHIS2 has booted.** Read the live file; insert this
+**immediately after the `echo "✅ Deployment completed"` line (~line 250)**,
+before the "Final output" echo block:
 
 ```bash
 # Empty instance (version, no seed): once DHIS2 has initialized its schema,
@@ -377,8 +377,9 @@ Add:
 if [ -n "$VERSION" ] && [ -z "$DB_SEED" ]; then
   echo "Waiting for DHIS2 to initialize before adding local_admin..."
   for i in $(seq 1 60); do
-    if curl -s -u admin:district -o /dev/null -w '%{http_code}' \
-         "http://localhost:$HTTP_PORT/api/system/info" | grep -q '^200$'; then
+    code=$(curl -s -u admin:district -o /dev/null -w '%{http_code}' \
+           "http://localhost:$HTTP_PORT/api/system/info" || true)
+    if [ "$code" = "200" ]; then
       "$SCRIPT_DIR/d2-local-admin" "$INSTANCE" add \
         && echo "✅ local_admin ensured" \
         || echo "⚠️  could not add local_admin (admin/district still works)"
