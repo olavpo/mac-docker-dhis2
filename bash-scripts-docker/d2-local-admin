@@ -76,16 +76,18 @@ VALUES ((SELECT userroleid FROM userrole WHERE uid='${LA_ROLE_UID}'), 'ALL');
 -- surname). We provide the NOT-NULL-without-default columns plus the identity
 -- and credential fields; unique/FK columns we do not set stay NULL/default.
 -- invitation/selfregistered/externalauth are set false (not left NULL): DHIS2's
--- authentication unboxes these Booleans, and a NULL causes a 401.
+-- authentication unboxes these Booleans, and a NULL causes a 401. We do NOT set
+-- twofactortype: it has a column default ('NOT_ENABLED') on versions that have
+-- it, and omitting it keeps this INSERT working on older schemas without it.
 INSERT INTO userinfo
   (userinfoid, uid, username, password, firstname, surname,
    disabled, invitation, selfregistered, externalauth,
-   twofactortype, uuid, created, lastupdated, passwordlastupdated)
+   uuid, created, lastupdated, passwordlastupdated)
 VALUES
   ((SELECT COALESCE(MAX(userinfoid),0)+1 FROM userinfo),
    '${LA_USER_UID}', '${LA_USER}', '${LA_PW_HASH}', 'Local', 'Admin',
    false, false, false, false,
-   'NOT_ENABLED', gen_random_uuid(), now(), now(), now());
+   gen_random_uuid(), now(), now(), now());
 
 -- Role membership.
 INSERT INTO userrolemembers (userroleid, userid)
@@ -116,8 +118,11 @@ BEGIN
 
   IF admin_id IS NOT NULL THEN
     -- Repoint every FK referencing userinfo(userinfoid) from local_admin to
-    -- admin, EXCEPT the junction tables (local_admin's own rows, deleted below;
-    -- reassigning them would collide on their unique keys).
+    -- admin, EXCEPT the membership junction tables (local_admin's own rows,
+    -- deleted below; reassigning them would collide on their unique keys).
+    -- the add path only ever writes usermembership + userrolemembers for
+    -- local_admin, so other user-orgunit junctions (data-view / TEI-search)
+    -- hold no local_admin rows and need no special handling here.
     FOR r IN
       SELECT tc.table_name AS t, kcu.column_name AS c
       FROM information_schema.table_constraints tc
