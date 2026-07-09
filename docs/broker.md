@@ -107,7 +107,7 @@ stable resolved from releases.dhis2.org) or an exact release (`2.42.4`).
 |---|---|
 | `GET /health` | Liveness (no auth) |
 | `GET /instances[?full=1]` | List instances (agent scope: `agent-*` only). `full=1` adds `dhis2_major_version` (slower) |
-| `POST /instances` | Create. Body: `{"name", "version"?, "seed"?, "tomcat"?, "memory"?, "war_url"?†, "war_file"?†}` → 202 job |
+| `POST /instances` | Create. Body: `{"name", "version"?, "seed"?, "tomcat"?, "memory"?, "http_port"?, "pg_port"?, "war_url"?†, "war_file"?†}` → 202 job |
 | `POST /instances/<name>/reset` | Restore DB from a seed. Body: `{"seed"}` → 202 job |
 | `POST /instances/<name>/start` | `docker compose up -d` → 202 job |
 | `POST /instances/<name>/stop` | `docker compose down` → 202 job |
@@ -124,6 +124,10 @@ stable resolved from releases.dhis2.org) or an exact release (`2.42.4`).
 
 `tomcat` is optional and auto-selected from `version` (DHIS2 ≤ 2.41 → Tomcat 9,
 ≥ 2.42 → Tomcat 10); a `tomcat` that conflicts with `version` fails the job.
+
+`http_port`/`pg_port` are optional (integers 1024–65535); omitted, the broker
+auto-selects a port not used or reserved by any other instance (running or
+stopped), so new instances no longer collide with stopped ones.
 
 `seed` accepts, by scope:
 

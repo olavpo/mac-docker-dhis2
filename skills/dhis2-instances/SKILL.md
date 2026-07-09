@@ -36,6 +36,9 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
 - **Don't set `tomcat` when you pass a `version`** — the broker auto-selects the
   compatible Tomcat (DHIS2 ≤ 2.41 needs Tomcat 9, ≥ 2.42 needs Tomcat 10). A
   conflicting `tomcat` makes the create job fail.
+- Ports: you normally reach instances via `devnet_url`, so you rarely need host
+  ports. If you do, pass `http_port`/`pg_port` (integers 1024–65535) on create;
+  omit them to let the broker pick free, non-colliding ports.
 
 ## Operations
 

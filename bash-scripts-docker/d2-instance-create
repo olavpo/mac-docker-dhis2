@@ -118,42 +118,42 @@ DHIS2_HOME="$DHIS2_BASE/$INSTANCE"
 
 
 
-# Auto-select HTTP port if not specified
+# HTTP port: auto-select a non-colliding one, or validate an explicit -p.
 if [ -z "$HTTP_PORT" ]; then
   echo "Auto-selecting HTTP port..."
   for port in $(seq 9010 9050); do
-    if ! docker ps --format '{{.Ports}}' | grep -q ":$port->"; then
-      if ! is_port_in_use "$port"; then
-        HTTP_PORT=$port
-        echo "Selected HTTP port: $HTTP_PORT"
-        break
-      fi
+    if port_available "$port"; then
+      HTTP_PORT=$port
+      echo "Selected HTTP port: $HTTP_PORT"
+      break
     fi
   done
-  
   if [ -z "$HTTP_PORT" ]; then
     echo "Error: No available HTTP ports found in range 9010-9050"
     exit 1
   fi
+elif ! port_available "$HTTP_PORT"; then
+  echo "Error: HTTP port $HTTP_PORT is already in use or reserved by another instance" >&2
+  exit 1
 fi
 
-# Auto-select PostgreSQL port if not specified
+# PostgreSQL port: auto-select a non-colliding one, or validate an explicit -g.
 if [ -z "$PG_PORT" ]; then
   echo "Auto-selecting PostgreSQL port..."
   for port in $(seq 5433 5999); do
-    if ! docker ps --format '{{.Ports}}' | grep -q ":$port->"; then
-      if ! is_port_in_use "$port"; then
-        PG_PORT=$port
-        echo "Selected PostgreSQL port: $PG_PORT"
-        break
-      fi
+    if port_available "$port"; then
+      PG_PORT=$port
+      echo "Selected PostgreSQL port: $PG_PORT"
+      break
     fi
   done
-  
   if [ -z "$PG_PORT" ]; then
     echo "Error: No available PostgreSQL ports found in range 5433-5999"
     exit 1
   fi
+elif ! port_available "$PG_PORT"; then
+  echo "Error: PostgreSQL port $PG_PORT is already in use or reserved by another instance" >&2
+  exit 1
 fi
 
 # Check if instance already exists
