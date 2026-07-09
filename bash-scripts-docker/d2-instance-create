@@ -249,6 +249,25 @@ if [ -n "$WAR_FILE" ] || [ -n "$WAR_URL" ] || [ -n "$VERSION" ] || [ -n "$DB_SEE
   echo "✅ Deployment completed"
 fi
 
+# Empty instance (version, no seed): once DHIS2 has initialized its schema,
+# ensure the known local_admin superuser. Best-effort — never fails the create.
+# (Seeded creates get local_admin via d2-db-restore instead.) No Tomcat restart
+# needed: local_admin has never been looked up, so nothing is cached for it.
+if [ -n "$VERSION" ] && [ -z "$DB_SEED" ]; then
+  echo "Waiting for DHIS2 to initialize before adding local_admin..."
+  for i in $(seq 1 60); do
+    code=$(curl -s -u admin:district -o /dev/null -w '%{http_code}' \
+           "http://localhost:$HTTP_PORT/api/system/info" || true)
+    if [ "$code" = "200" ]; then
+      "$SCRIPT_DIR/d2-local-admin" "$INSTANCE" add \
+        && echo "✅ local_admin ensured" \
+        || echo "⚠️  could not add local_admin (admin/district still works)"
+      break
+    fi
+    sleep 10
+  done
+fi
+
 # Final output
 echo ""
 echo "✅ DHIS2 instance $INSTANCE created successfully with Tomcat $TOMCAT_DISPLAY"
