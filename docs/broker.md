@@ -129,6 +129,10 @@ stable resolved from releases.dhis2.org) or an exact release (`2.42.4`).
 auto-selects a port not used or reserved by any other instance (running or
 stopped), so new instances no longer collide with stopped ones.
 
+A known `local_admin` / `district` superuser (`ALL` authority) is ensured on
+every restore and create, independent of the restored database's own `admin`,
+and is stripped from backup dumps.
+
 `seed` accepts, by scope:
 
 | Form | Example | Who |

@@ -225,6 +225,11 @@ takes a seed.
 
 Returns **202 + job**.
 
+On restore the broker ensures a known `local_admin` / `district` superuser
+(`ALL` authority) exists regardless of the restored database's own `admin`;
+it is stripped from backups (`POST /instances/<name>/backup`), so dumps never
+contain it. The same `local_admin` is ensured on create.
+
 ### `POST /instances/<name>/start` and `POST /instances/<name>/stop`
 
 `docker compose up -d` / `docker compose down`. Body ignored. Returns

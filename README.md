@@ -79,6 +79,7 @@ All scripts are in `bash-scripts-docker/` and expect:
 - **Database**
   - `d2-db-backup` — backup DB to `$DHIS2_BASE/_backups/<instance>/...`
   - `d2-db-restore` — restore DB from `.sql`, `.sql.gz`, or `.pgc`
+  - `d2-local-admin` — ensure/remove the known `local_admin` superuser in an instance DB
   - `d2-db-version` — restore a backup into a temp instance and read `flyway_schema_history`
   - `d2-psql` — open `psql` inside the DB container
 
