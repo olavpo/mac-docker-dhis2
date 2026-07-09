@@ -64,14 +64,20 @@ Run as one SQL transaction:
    parentid IS NULL`). Inserts nothing when the DB has no org units (fine).
 
 ### `remove`
+Run as one SQL transaction.
 1. Resolve `local_admin`'s `userinfoid` (no-op if absent) and `admin`'s
    `userinfoid`.
 2. **If `admin` exists — reassign then delete:** a `DO`/plpgsql block queries
    `information_schema` for every column with a foreign key referencing
    `userinfo(userinfoid)`, and for each runs `UPDATE <t> SET <col>=<admin_id>
    WHERE <col>=<local_admin_id>` (repointing created-by/last-updated-by/etc.).
-   Then delete `local_admin` (`usermembership`, `userrolemembers`, `userinfo`)
-   and the dedicated role.
+   The loop **explicitly excludes the junction tables `usermembership` and
+   `userrolemembers`** — those are `local_admin`'s own membership rows, deleted
+   in the next step; reassigning them to `admin` would collide on their unique
+   keys (`local_admin` is granted the same root org unit `admin` typically
+   already has). Then delete, respecting FK order: `local_admin`'s
+   `usermembership` and `userrolemembers` rows, then its `userinfo` row; and for
+   the dedicated role, `userroleauthorities` **before** `userrole`.
 3. **If `admin` does not exist — scrub:** set `local_admin.password` to a random
    unusable value and `disabled=true`; leave the row and role in place. (The
    backup then contains a disabled, unusable `local_admin` rather than a
