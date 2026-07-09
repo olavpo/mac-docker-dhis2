@@ -1,0 +1,157 @@
+#!/bin/bash
+#   Ensure/remove a known superuser `local_admin` (password: district) in an
+#   instance's DHIS2 database, so an agent always has a superuser regardless of
+#   what database was restored. Added on restore/create; removed from backups.
+#   See docs/superpowers/specs/2026-07-09-local-admin-user-design.md
+#
+#   Usage: d2-local-admin <instance name> <add|remove>
+
+set -euo pipefail
+IFS=$'\n\t'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/d2-lib.sh"
+
+LA_USER="local_admin"
+LA_USER_UID="LocalAdmn01"
+LA_ROLE_UID="LocalAdmnR1"
+LA_ROLE_NAME="local_admin superuser"
+# bcrypt hash of 'district' (a valid, portable $2a$ bcrypt — verified against a
+# stock DHIS2 admin/district). Single-quoted so the $-sequences stay literal;
+# referenced via ${LA_PW_HASH} in the heredocs, never embedded raw.
+LA_PW_HASH='$2a$10$Lsc9IyMftwe/8LaTSbfKn.k0XB4.lr7yyADTEVh3HsjVUzIp6ttzK'
+
+if [ -z "${DHIS2_BASE:-}" ]; then
+  echo "Error: DHIS2_BASE environment variable not set" >&2
+  exit 1
+fi
+
+usage() {
+  echo "Usage: $0 <instance name> <add|remove>" >&2
+  exit 1
+}
+
+[ $# -eq 2 ] || usage
+INSTANCE=$1
+ACTION=$2
+
+if [ ! -d "$DHIS2_BASE/$INSTANCE" ]; then
+  echo "Error: instance $INSTANCE does not exist" >&2
+  exit 1
+fi
+
+DB_CONTAINER=$(resolve_db_container "$INSTANCE") || {
+  echo "Error: database container for $INSTANCE not found" >&2
+  exit 1
+}
+if [ "$(docker inspect -f '{{.State.Status}}' "$DB_CONTAINER" 2>/dev/null)" != "running" ]; then
+  echo "Error: database container $DB_CONTAINER is not running" >&2
+  exit 1
+fi
+
+psql_exec() { docker exec -i "$DB_CONTAINER" psql -U dhis -d dhis2 -v ON_ERROR_STOP=1 "$@"; }
+
+la_add() {
+  psql_exec <<SQL
+BEGIN;
+
+-- Clean slate (assumes local_admin has no FK refs yet — true right after a
+-- restore/create, and backups never contain local_admin).
+DELETE FROM usermembership  WHERE userinfoid IN (SELECT userinfoid FROM userinfo WHERE username='${LA_USER}');
+DELETE FROM userrolemembers WHERE userid     IN (SELECT userinfoid FROM userinfo WHERE username='${LA_USER}');
+DELETE FROM userinfo        WHERE username='${LA_USER}';
+DELETE FROM userroleauthorities WHERE userroleid IN (SELECT userroleid FROM userrole WHERE uid='${LA_ROLE_UID}');
+DELETE FROM userrolemembers     WHERE userroleid IN (SELECT userroleid FROM userrole WHERE uid='${LA_ROLE_UID}');
+DELETE FROM userrole WHERE uid='${LA_ROLE_UID}';
+
+-- Dedicated superuser role (ALL authority).
+INSERT INTO userrole (userroleid, uid, name, created, lastupdated)
+VALUES ((SELECT COALESCE(MAX(userroleid),0)+1 FROM userrole),
+        '${LA_ROLE_UID}', '${LA_ROLE_NAME}', now(), now());
+INSERT INTO userroleauthorities (userroleid, authority)
+VALUES ((SELECT userroleid FROM userrole WHERE uid='${LA_ROLE_UID}'), 'ALL');
+
+-- local_admin user. Explicit column list: every column not named here is
+-- nullable or has a default, and the name column is generated (firstname plus
+-- surname). We provide the NOT-NULL-without-default columns plus the identity
+-- and credential fields; unique/FK columns we do not set stay NULL/default.
+-- invitation/selfregistered/externalauth are set false (not left NULL): DHIS2's
+-- authentication unboxes these Booleans, and a NULL causes a 401.
+INSERT INTO userinfo
+  (userinfoid, uid, username, password, firstname, surname,
+   disabled, invitation, selfregistered, externalauth,
+   twofactortype, uuid, created, lastupdated, passwordlastupdated)
+VALUES
+  ((SELECT COALESCE(MAX(userinfoid),0)+1 FROM userinfo),
+   '${LA_USER_UID}', '${LA_USER}', '${LA_PW_HASH}', 'Local', 'Admin',
+   false, false, false, false,
+   'NOT_ENABLED', gen_random_uuid(), now(), now(), now());
+
+-- Role membership.
+INSERT INTO userrolemembers (userroleid, userid)
+VALUES ((SELECT userroleid FROM userrole WHERE uid='${LA_ROLE_UID}'),
+        (SELECT userinfoid FROM userinfo WHERE username='${LA_USER}'));
+
+-- Data-capture org units = root org unit(s). Inserts nothing on an OU-less DB.
+INSERT INTO usermembership (userinfoid, organisationunitid)
+SELECT (SELECT userinfoid FROM userinfo WHERE username='${LA_USER}'), organisationunitid
+FROM organisationunit WHERE parentid IS NULL;
+
+COMMIT;
+SQL
+}
+
+la_remove() {
+  psql_exec <<SQL
+BEGIN;
+DO \$\$
+DECLARE
+  la_id bigint;
+  admin_id bigint;
+  r record;
+BEGIN
+  SELECT userinfoid INTO la_id FROM userinfo WHERE username='${LA_USER}';
+  IF la_id IS NULL THEN RETURN; END IF;
+  SELECT userinfoid INTO admin_id FROM userinfo WHERE username='admin';
+
+  IF admin_id IS NOT NULL THEN
+    -- Repoint every FK referencing userinfo(userinfoid) from local_admin to
+    -- admin, EXCEPT the junction tables (local_admin's own rows, deleted below;
+    -- reassigning them would collide on their unique keys).
+    FOR r IN
+      SELECT tc.table_name AS t, kcu.column_name AS c
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+      JOIN information_schema.constraint_column_usage ccu
+        ON tc.constraint_name = ccu.constraint_name
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND ccu.table_name = 'userinfo' AND ccu.column_name = 'userinfoid'
+        AND tc.table_name NOT IN ('usermembership','userrolemembers')
+    LOOP
+      EXECUTE format('UPDATE %I SET %I=%L WHERE %I=%L', r.t, r.c, admin_id, r.c, la_id);
+    END LOOP;
+
+    DELETE FROM usermembership  WHERE userinfoid = la_id;
+    DELETE FROM userrolemembers WHERE userid = la_id;
+    DELETE FROM userinfo        WHERE userinfoid = la_id;
+    DELETE FROM userroleauthorities WHERE userroleid IN (SELECT userroleid FROM userrole WHERE uid='${LA_ROLE_UID}');
+    DELETE FROM userrolemembers     WHERE userroleid IN (SELECT userroleid FROM userrole WHERE uid='${LA_ROLE_UID}');
+    DELETE FROM userrole WHERE uid='${LA_ROLE_UID}';
+  ELSE
+    -- No admin to reassign to: scrub (disable + unusable password), keep the row.
+    UPDATE userinfo
+       SET password = '!disabled-' || md5(random()::text), disabled = true
+     WHERE userinfoid = la_id;
+  END IF;
+END
+\$\$;
+COMMIT;
+SQL
+}
+
+case "$ACTION" in
+  add)    la_add;    echo "✅ local_admin ensured on $INSTANCE (password: district)";;
+  remove) la_remove; echo "✅ local_admin removed from $INSTANCE";;
+  *) usage;;
+esac
