@@ -175,6 +175,8 @@ Body:
   "seed": "sl-demo-v42.sql.gz",  // optional; see Seed forms below
   "tomcat": "10",                // optional; "9"/"10". Auto-selected from version if omitted
   "memory": "4g",                // optional; Tomcat max heap (-Xmx), default 4g
+  "http_port": 9010,             // optional; host HTTP port. Auto-selected (free) if omitted
+  "pg_port": 5433,               // optional; host Postgres port. Auto-selected (free) if omitted
   "war_url":  "https://...",     // optional; admin only
   "war_file": "/abs/path.war"    // optional; admin only
 }
@@ -192,6 +194,9 @@ Validation:
 - `memory` matches `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`); default `4g` when
   omitted. Agent scope: heap above `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`)
   → `400`.
+- `http_port` / `pg_port` are integers `1024–65535` (else `400`). Omitted →
+  the broker auto-selects a port not used or reserved by any other instance
+  (running or stopped). An explicit port already in use/reserved fails the job.
 - `war_url` must be `http://` or `https://`.
 - Agent scope:
   - `war_url` / `war_file` → `403`.
