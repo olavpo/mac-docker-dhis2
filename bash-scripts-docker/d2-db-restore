@@ -162,6 +162,14 @@ echo "✅ Database restoration completed successfully!"
 docker exec "$DB_CONTAINER" rm /tmp/restore.sql
 rm -f "$TEMP_SQL"
 
+# Ensure the known local_admin superuser exists regardless of what was
+# restored. Tomcat is still stopped here, so the restart below rebuilds the
+# user cache. Best-effort: the restore itself already succeeded.
+echo "Ensuring local_admin superuser..."
+if ! "$SCRIPT_DIR/d2-local-admin" "$INSTANCE" add; then
+  echo "⚠️  Warning: could not ensure local_admin (restore itself succeeded)"
+fi
+
 # Restart Tomcat container
 echo "Restarting Tomcat container..."
 if [ -n "$TOMCAT_CONTAINER" ]; then
