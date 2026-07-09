@@ -173,9 +173,11 @@ PGPASSWORD=dhis psql -h dhis2-agent-mytest-db -U dhis -d dhis2 \
   `admin` disabled (`401 "Account disabled"`) or with a non-default
   password. DHIS2 caches user details, so a failed login *sticks* until
   Tomcat restarts — verify credentials with `GET /api/me` (Basic auth)
-  before building tests on the instance. To re-enable `admin` and reset to
-  `district`, edit the DB directly (Tomcat won't let you log in to fix it
-  via UI):
+  before building tests on the instance. **Simplest: just use the
+  always-present `local_admin` / `district` superuser** (see "Guaranteed
+  superuser" above) instead of repairing `admin`. Only if you specifically
+  need `admin` itself re-enabled and reset to `district`, edit the DB
+  directly (Tomcat won't let you log in to fix it via UI):
 
   ```bash
   # Generate a bcrypt hash for 'district' (or any chosen password) — DHIS2
@@ -193,11 +195,24 @@ PGPASSWORD=dhis psql -h dhis2-agent-mytest-db -U dhis -d dhis2 \
   minutes to boot (Flyway migrations on empty DBs take a while). Poll
   `/api/system/info` until it answers; 502/connection-refused means Tomcat
   is still starting.
+- **Warm the app before API-only smoke tests**: on a freshly booted (or
+  restarted) instance, some legacy endpoints can persistently 500 —
+  e.g. `GET /api/authorities` returning
+  `"Struts Dispatcher.getInstance() is null"` on 2.41.9 — until *something*
+  has loaded the legacy web layer once. A single GET to a Struts page
+  (`/dhis-web-commons/security/login.action`, or the app root in a browser)
+  primes it and the 500s go away. Any 500 that only reproduces on a fresh
+  boot with curl should be re-verified after this warm-up before it is
+  filed as a finding — it's an environment quirk, not an app bug.
 - An empty instance (created with a `version` but no seed) has no
-  organisation units, users besides admin, or metadata — import what you
-  need, or use a seed.
-- For browser/Playwright login use `POST /api/auth/login` with JSON body to
-  get a session cookie; the React login page resists programmatic form fills.
+  organisation units or metadata, and only the `admin` and `local_admin`
+  users — import what you need, or use a seed.
+- For browser/Playwright login use **Basic-auth `GET /api/me`** to get a
+  session cookie; the React login page resists programmatic form fills.
+  Do **not** use `POST /api/auth/login` — it doesn't exist on 2.40 and
+  responds with a 302 to the legacy login page; a client that follows
+  redirects silently captures an anonymous cookie (HTTP 200, no error) and
+  your test then renders the login screen instead of the app.
 
 ## Etiquette
 
