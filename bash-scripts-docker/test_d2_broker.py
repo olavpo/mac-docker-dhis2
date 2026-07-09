@@ -121,5 +121,15 @@ class MemoryRe(unittest.TestCase):
             self.assertIsNone(broker.MEMORY_RE.match(bad))
 
 
+class ValidPort(unittest.TestCase):
+    def test_valid(self):
+        for p in (1024, 65535, 8080, "9010"):
+            self.assertTrue(broker.valid_port(p), p)
+
+    def test_invalid(self):
+        for p in (1023, 70000, 0, "abc", None, "80.5", ""):
+            self.assertFalse(broker.valid_port(p), p)
+
+
 if __name__ == "__main__":
     unittest.main()

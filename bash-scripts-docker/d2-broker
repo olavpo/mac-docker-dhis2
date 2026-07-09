@@ -234,6 +234,15 @@ def mem_to_mb(size):
     return n * 1024 if m.group(2) in "gG" else n
 
 
+def valid_port(n):
+    """True iff n is an integer host port in [1024, 65535]."""
+    try:
+        p = int(n)
+    except (TypeError, ValueError):
+        return False
+    return 1024 <= p <= 65535
+
+
 def transition_error(current_major, target_major):
     """Message for an unsupported DHIS2 version transition, else None.
     Only enforced when both majors are known; downgrades and major-skips
@@ -714,6 +723,12 @@ class Handler(BaseHTTPRequestHandler):
         if body.get("memory"):
             self.validate_memory(body["memory"], scope)
             argv += ["-m", str(body["memory"])]
+        for field, flag in (("http_port", "-p"), ("pg_port", "-g")):
+            val = body.get(field)
+            if val is not None:
+                if not valid_port(val):
+                    raise ApiError(400, f"{field} must be an integer 1024-65535")
+                argv += [flag, str(int(val))]
         argv.append(name)
 
         # The compose template already joins dev-net for Tomcat; the attach
