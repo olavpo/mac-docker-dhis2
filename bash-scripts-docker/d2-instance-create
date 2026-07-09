@@ -30,7 +30,8 @@ usage() {
   echo "  -p <port>       HTTP port (default: auto-select 9010-9050)"
   echo "  -g <port>       PostgreSQL port (default: auto-select 5433-5999)"
   echo "  -f <war_file>   Custom WAR file to deploy"
-  echo "  -t <version>    Tomcat version: 9 or 10 (default: 10)"
+  echo "  -t <version>    Tomcat 9 or 10 (usually omit: auto-selected from -v;"
+  echo "                  DHIS2 <=2.41 -> 9, >=2.42 -> 10). Default 10 without -v."
   echo "  -m <size>       Java max heap, e.g. 2g (default: 4g / \$D2_DEFAULT_MEMORY)"
   echo "Example: $0 -v 2.42.4 -p 9006 -g 5433 myinstance"
   echo "Example with URL: $0 -l https://example.com/custom.war -p 9006 myinstance"
@@ -48,7 +49,7 @@ DB_SEED=""
 HTTP_PORT=""
 PG_PORT=""
 WAR_FILE=""
-TOMCAT_VERSION="10"  # Default to Tomcat 10
+TOMCAT_VERSION=""  # empty = not specified; resolved below (auto from -v, else 10)
 MEMORY=""
 DEFAULT_MEMORY="${D2_DEFAULT_MEMORY:-4g}"  # Tomcat max heap when -m omitted
 
@@ -81,6 +82,28 @@ fi
 if [ -n "$DB_SEED" ]; then
   DB_SEED=$(abspath "$DB_SEED")
 fi
+
+# Validate an explicit -t and reconcile Tomcat with the DHIS2 version. Done
+# here — before port selection, directory creation, or docker — so the error
+# paths exit with no side effects.
+if [ -n "$TOMCAT_VERSION" ] && [ "$TOMCAT_VERSION" != "9" ] && [ "$TOMCAT_VERSION" != "10" ]; then
+  echo "Error: -t must be 9 or 10 (got '$TOMCAT_VERSION')" >&2
+  exit 1
+fi
+if [ -n "$VERSION" ]; then
+  DHIS_MAJOR=$(dhis2_major "$VERSION")
+  REQ_TOMCAT=$(required_tomcat_for_major "$DHIS_MAJOR")
+  if [ -z "$TOMCAT_VERSION" ]; then
+    TOMCAT_VERSION="$REQ_TOMCAT"
+    echo "Auto-selected Tomcat $TOMCAT_VERSION for DHIS2 $VERSION (major $DHIS_MAJOR)"
+  elif [ "$TOMCAT_VERSION" != "$REQ_TOMCAT" ]; then
+    echo "Error: DHIS2 $VERSION (major $DHIS_MAJOR) requires Tomcat $REQ_TOMCAT," >&2
+    echo "       but -t $TOMCAT_VERSION was given. Omit -t to auto-select, or pass -t $REQ_TOMCAT." >&2
+    exit 1
+  fi
+fi
+# Fallback when nothing set it (no -v, or -l/-f WAR sources).
+TOMCAT_VERSION="${TOMCAT_VERSION:-10}"
 
 # Resolve and validate the Tomcat max heap (default 4g; see D2_DEFAULT_MEMORY)
 MEMORY="${MEMORY:-$DEFAULT_MEMORY}"
