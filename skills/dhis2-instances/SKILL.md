@@ -23,8 +23,13 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
   user has approved for agent use), or **no seed at all** for a clean, empty
   DHIS2 that initializes itself on first start. You cannot restore real
   backups, host files, or URLs — don't ask the broker to; it will refuse.
-- There is a cap on concurrent `agent-*` instances. Delete instances you no
-  longer need.
+- There is a cap on concurrent `agent-*` instances — it counts **stopped
+  instances too**, including stale leftovers from earlier sessions. When the
+  cap is hit, the error names deletion candidates; delete only `agent-*`
+  ones. In practice, keep the live footprint to **1 running instance where
+  possible, 2 max**: two DHIS2 instances *booting* concurrently starve each
+  other (20+ minutes with nothing on `/api`). If you need a second, wait
+  until the first answers `/api/system/info` before creating it.
 - **Backups are admin-only**: `POST /instances/<name>/backup` returns `403`
   for your token (`_backups/` is the user's territory). To get clean or known
   state, reset from a seed or delete and re-create — don't try to back up.
@@ -156,7 +161,26 @@ PGPASSWORD=dhis psql -h dhis2-agent-mytest-db -U dhis -d dhis2 \
 ### Other notes
 
 - **Default credentials** `admin` / `district` (standard DHIS2 dev default;
-  seeds may differ — ask the user if login fails).
+  seeds may differ — ask the user if login fails). Some seeds ship with
+  `admin` disabled (`401 "Account disabled"`) or with a non-default
+  password. DHIS2 caches user details, so a failed login *sticks* until
+  Tomcat restarts — verify credentials with `GET /api/me` (Basic auth)
+  before building tests on the instance. To re-enable `admin` and reset to
+  `district`, edit the DB directly (Tomcat won't let you log in to fix it
+  via UI):
+
+  ```bash
+  # Generate a bcrypt hash for 'district' (or any chosen password) — DHIS2
+  # accepts both $2a$ and $2b$ prefixes at cost 10:
+  HASH=$(python3 -c "import bcrypt; print(bcrypt.hashpw(b'district', bcrypt.gensalt(10)).decode())")
+
+  PGPASSWORD=dhis psql -h dhis2-<name>-db -U dhis -d dhis2 \
+    -c "UPDATE userinfo SET disabled=false, password='$HASH' WHERE username='admin';"
+
+  # Restart Tomcat to invalidate the cached user details:
+  curl -s -X POST -H "$H" $B/instances/agent-<name>/stop
+  curl -s -X POST -H "$H" $B/instances/agent-<name>/start
+  ```
 - **Startup time**: after a create with a version, DHIS2 still needs 1–5
   minutes to boot (Flyway migrations on empty DBs take a while). Poll
   `/api/system/info` until it answers; 502/connection-refused means Tomcat
