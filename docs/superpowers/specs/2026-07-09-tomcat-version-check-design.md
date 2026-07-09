@@ -124,12 +124,21 @@ The broker's existing upfront `tomcat` validation (`"9"`/`"10"`) is unchanged.
   usually unnecessary; `-t` must be `9` or `10`.
 - `README.md`: mention that `-v` picks the right Tomcat automatically.
 - `docs/broker-api.md`: on `POST /instances`, note `tomcat` is optional and is
-  auto-selected from `version`; a conflicting `tomcat` fails the job.
+  auto-selected from `version`; a conflicting `tomcat` fails the job. When
+  editing, `grep` for every occurrence of the current "`tomcat` … default
+  `10`" framing (there are at least two — the `POST /instances` body comment and
+  the §7 "For creation" note) so the doc isn't left self-contradictory.
 - `docs/broker.md`: same note on the create row.
 - `skills/dhis2-instances/SKILL.md`: tell agents not to set `tomcat` alongside
   `version` — the broker picks the compatible Tomcat.
 
 ## 6. Testing
+
+**Mechanism:** the repo has no bash test harness (only the broker's Python
+`unittest` suite in `test_d2_broker.py`). Following the established convention
+for the shell tools, these are **inline verification commands run during the
+plan** (`bash -n` plus `bash -c 'source d2-lib.sh; …'` assertions) — not a new
+bash test framework.
 
 - **Bash helper checks (no Docker)** — source `d2-lib.sh` and assert:
   - `dhis2_major`: `42→42`, `2.42→42`, `2.42.4→42`, `41→41`, `41.4→41`.
