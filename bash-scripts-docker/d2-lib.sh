@@ -49,6 +49,25 @@ is_port_in_use() {
   fi
 }
 
+# Host ports already mapped in any instance's compose (tomcat 8080 and db 5432
+# mappings). One port per line; empty (exit 0) if none match.
+configured_ports() {
+  local base="${DHIS2_BASE:-}"
+  [ -n "$base" ] || return 0
+  grep -hoE '[0-9]+:(8080|5432)' "$base"/*/docker-compose.yml 2>/dev/null \
+    | cut -d: -f1 || true
+}
+
+# Exit 0 if a host port is free to claim: not reserved by an instance compose,
+# not published by a running container, not held by a host listener.
+port_available() {
+  local port="$1"
+  if configured_ports | grep -qx "$port"; then return 1; fi
+  if docker ps --format '{{.Ports}}' 2>/dev/null | grep -q ":$port->"; then return 1; fi
+  if is_port_in_use "$port"; then return 1; fi
+  return 0
+}
+
 # Version normalization
 normalize_version() {
   local v="$1"
