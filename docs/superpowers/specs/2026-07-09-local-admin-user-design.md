@@ -139,12 +139,18 @@ changes.
 
 ## 7. Version-sensitivity / validation
 
-Exact table and column names (`userinfo`, `userrole`, `userroleauthorities`,
-`userrolemembers`, `usermembership`, `organisationunit`) and the set of NOT-NULL
-`userinfo` columns are validated against a live current instance during
-implementation. The clone-a-row technique (§1.3) avoids hard-coding the column
-list. If any object differs on the target version, the live test (below) catches
-it.
+**Verified live on DHIS2 2.40, 2.41, 2.42, and 2.43** (empty instances — Tomcat 9
+for ≤ 2.41, Tomcat 10 for ≥ 2.42 via auto-selection): on every one,
+`local_admin` / `district` logs in with `ALL` authority, and `remove`/scrub run
+with no FK errors.
+
+Two schema quirks surfaced during implementation and are handled in the shipped
+`d2-local-admin` (superseding the clone-a-row sketch in §1.3): (1) `userinfo.name`
+is a **generated column**, so `add` uses an explicit column-list `INSERT`;
+(2) DHIS2 authentication NULL-checks the `invitation` / `selfregistered` /
+`externalauth` Booleans, so `add` sets them `false`. `twofactortype` is left to
+its column default, which keeps the `INSERT` working on pre-2.42 schemas that
+lack the column.
 
 ## 8. Testing
 

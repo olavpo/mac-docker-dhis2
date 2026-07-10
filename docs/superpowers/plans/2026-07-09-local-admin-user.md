@@ -21,6 +21,13 @@ starting point for DHIS2 2.41/2.42; the implementer MUST inspect the live schema
 prove each behavior against a running instance. There is **no offline test** for
 the SQL.
 
+> **Outcome:** the shipped `d2-local-admin` is verified live on **2.40, 2.41,
+> 2.42, and 2.43**. Two quirks required adapting the sketch below: `userinfo.name`
+> is a generated column (so `add` uses an explicit-column `INSERT`, not the
+> clone-a-row in Task 1), and `invitation`/`selfregistered`/`externalauth` must be
+> set `false` (a NULL trips DHIS2 auth → 401). `twofactortype` is omitted so the
+> `INSERT` works on pre-2.42 schemas.
+
 **Constants** (used throughout):
 - username `local_admin`, password `district`
 - bcrypt hash of `district`: `$2a$10$AY3Z6Z5b4gT8XKcqjq6zt.b3G0K2fH6mV3s7dS0rSxrqBcYb.7fWO`
