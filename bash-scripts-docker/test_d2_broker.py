@@ -131,5 +131,16 @@ class ValidPort(unittest.TestCase):
             self.assertFalse(broker.valid_port(p), p)
 
 
+class RequiredTomcatMajor(unittest.TestCase):
+    def test_mapping(self):
+        self.assertEqual(broker.required_tomcat_major(40), 9)
+        self.assertEqual(broker.required_tomcat_major(41), 9)
+        self.assertEqual(broker.required_tomcat_major(42), 10)
+        self.assertEqual(broker.required_tomcat_major(43), 10)
+
+    def test_none(self):
+        self.assertIsNone(broker.required_tomcat_major(None))
+
+
 if __name__ == "__main__":
     unittest.main()
