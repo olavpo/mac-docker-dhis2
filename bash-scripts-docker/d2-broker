@@ -280,6 +280,14 @@ def current_tomcat_major(name):
     return None
 
 
+def required_tomcat_major(dhis2_major):
+    """Tomcat major a DHIS2 major needs: <=41 -> 9, else 10.
+    Mirrors required_tomcat_for_major in d2-lib.sh. None if unknown."""
+    if dhis2_major is None:
+        return None
+    return 9 if dhis2_major <= 41 else 10
+
+
 def dump_element(path, source, root):
     """Build a GET /seeds-shaped element for a dump file under `root`.
     Backup sources get a 'backups/' path prefix."""
@@ -830,9 +838,28 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(400, "version must look like 42, 2.42 or 2.42.1")
             cur = instance_version(name)
             cur_major = int(cur) if cur and cur.isdigit() else None
-            err = transition_error(cur_major, extract_target_major(version))
+            target_major = extract_target_major(version)
+            err = transition_error(cur_major, target_major)
             if err:
                 raise ApiError(400, err)
+            # In-place upgrade swaps only the WAR, never the servlet container.
+            # DHIS2 <=41 runs on Tomcat 9 (javax.servlet); >=42 needs Tomcat 10
+            # (jakarta). Deploying a 2.42 WAR onto the instance's Tomcat 9 boots
+            # to an all-404 instance with no error. Refuse the boundary crossing
+            # with actionable guidance rather than silently bricking it.
+            need_tomcat = required_tomcat_major(target_major)
+            have_tomcat = current_tomcat_major(name)
+            if (need_tomcat is not None and have_tomcat is not None
+                    and need_tomcat != have_tomcat):
+                raise ApiError(
+                    400,
+                    f"in-place upgrade across the Tomcat {have_tomcat} -> "
+                    f"{need_tomcat} boundary is not supported: DHIS2 "
+                    f"{target_major} needs Tomcat {need_tomcat} but this "
+                    f"instance runs Tomcat {have_tomcat}, and /upgrade swaps "
+                    f"only the WAR (the result would 404 everywhere). Instead "
+                    f"create a fresh instance at {version} with the older seed "
+                    f"and let Flyway migrate it on boot.")
             deploy += ["-v", str(version)]
         elif war_url:
             if scope != "all":

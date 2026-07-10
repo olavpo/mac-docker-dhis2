@@ -105,7 +105,13 @@ path** (e.g. "does this metadata survive a 2.41 → 2.42 upgrade"). If you just
 need an instance at version X, create one at X — don't create-then-upgrade.
 For your token: only the `version` form works (`war_url`/`war_file` are
 admin-only → 403), and only same-major or one-major-up is allowed (downgrades
-and skips → 400). The pre-upgrade backup (`backup_first`) is skipped
+and skips → 400). **`/upgrade` cannot cross the 2.41 → 2.42 boundary**: instances created at
+≤ 2.41 run Tomcat 9, but 2.42+ needs Tomcat 10, and `/upgrade` swaps only the
+WAR, not Tomcat. The broker **refuses this crossing with a `400`** (deploying a
+2.42 WAR onto the old Tomcat 9 would 404 everywhere). To move a database across
+that boundary, **create a fresh instance at the target version with the older
+seed** and let Flyway migrate it on boot (a v41 seed on a 2.42/2.43 instance
+migrates fine, though the first boot's migration takes ~10 min). The pre-upgrade backup (`backup_first`) is skipped
 automatically for your token — it would land in admin-only `_backups/`, which
 you can't read back — so there's no safety net: if an upgrade breaks the
 instance, delete and re-create. The job `result` carries a best-effort
@@ -166,6 +172,20 @@ PGPASSWORD=dhis psql -h dhis2-agent-mytest-db -U dhis -d dhis2 \
   -c "SELECT count(*) FROM datavalue;"
 ```
 
+**If `psql` isn't available** (the standard agent-sandbox ships
+`postgresql-client`, but a leaner environment may not), use the pure-Python
+`pg8000` driver from PyPI instead — no system package needed:
+
+```bash
+pip install pg8000        # pure-Python Postgres driver
+```
+```python
+import pg8000.native
+con = pg8000.native.Connection(
+    host="dhis2-agent-mytest-db", user="dhis", password="dhis", database="dhis2")
+print(con.run("SELECT count(*) FROM datavalue"))
+```
+
 ### Other notes
 
 - **Default credentials** `admin` / `district` (standard DHIS2 dev default;
@@ -184,6 +204,8 @@ PGPASSWORD=dhis psql -h dhis2-agent-mytest-db -U dhis -d dhis2 \
   # accepts both $2a$ and $2b$ prefixes at cost 10:
   HASH=$(python3 -c "import bcrypt; print(bcrypt.hashpw(b'district', bcrypt.gensalt(10)).decode())")
 
+  # (if psql is unavailable, run the same UPDATE via pg8000 — see
+  #  "Direct database access" below)
   PGPASSWORD=dhis psql -h dhis2-<name>-db -U dhis -d dhis2 \
     -c "UPDATE userinfo SET disabled=false, password='$HASH' WHERE username='admin';"
 
