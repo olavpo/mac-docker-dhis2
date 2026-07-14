@@ -16,12 +16,56 @@ services:
       timeout: 5s
       retries: 5
 
+  # Optional Apache Doris analytics backend (DHIS2 >= 42). Activated by
+  # COMPOSE_PROFILES=analytics-doris in the instance .env (written by
+  # d2-instance-create -a doris); inert otherwise. See
+  # docs/doris/spike-findings-2026-07-14.md for the sizing rationale.
+  doris:
+    image: apache/doris:3.0.8-all
+    restart: always
+    profiles: ["analytics-doris"]
+    environment:
+      # Docker Desktop's VM has vm.max_map_count=262144 and refuses
+      # per-container sysctls; this skips the BE's startup check.
+      SKIP_CHECK_ULIMIT: "true"
+    mem_limit: 5500m
+    volumes:
+      # fe.conf/be.conf must NOT be :ro — the entrypoint appends
+      # priority_networks on first boot.
+      - ./doris/fe.conf:/opt/apache-doris/fe/conf/fe.conf
+      - ./doris/be.conf:/opt/apache-doris/be/conf/be.conf
+      # DHIS2 hands Doris a bare driver filename; the jar must exist in
+      # both FE and BE jdbc_drivers dirs.
+      - ./doris/postgresql-42.7.5.jar:/opt/apache-doris/fe/jdbc_drivers/postgresql.jar:ro
+      - ./doris/postgresql-42.7.5.jar:/opt/apache-doris/be/jdbc_drivers/postgresql.jar:ro
+      - doris_fe_meta:/opt/apache-doris/fe/doris-meta
+      - doris_be_storage:/opt/apache-doris/be/storage
+    healthcheck:
+      # FE answers SELECT 1 ~30-60s before the BE registers; gate on BE
+      # aliveness so depends_on really means "Doris can take queries".
+      test: ["CMD-SHELL", "mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW BACKENDS\\G' 2>/dev/null | grep -q 'Alive: true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    networks:
+      default: {}
+      dev-net:
+        aliases:
+          - dhis2-${INSTANCE_NAME}-doris
+
   tomcat:
     image: tomcat:10-jdk17
     restart: always
     depends_on:
       db:
         condition: service_healthy
+      # Ignored when the analytics-doris profile is inactive (compose >=
+      # 2.20 semantics); with the profile active, tomcat waits for a
+      # query-ready Doris.
+      doris:
+        condition: service_healthy
+        required: false
     ports:
       - "${HTTP_PORT:-8080}:8080"
     environment:
@@ -47,3 +91,5 @@ networks:
 
 volumes:
   db_data:
+  doris_fe_meta:
+  doris_be_storage:
