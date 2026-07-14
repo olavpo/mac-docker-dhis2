@@ -127,6 +127,41 @@ get_db_major_version() {
 }
 
 
+# Doris (analytics backend) container for an instance, if any.
+resolve_doris_container() {
+  local instance="$1"
+  if docker ps -a --format '{{.Names}}' | grep -q "^${instance}-doris-1$"; then
+    echo "${instance}-doris-1"
+  elif docker ps -a --format '{{.Names}}' | grep -q "^${instance}_doris_1$"; then
+    echo "${instance}_doris_1"
+  else
+    return 1
+  fi
+}
+
+# One-time Doris initialization after the container is healthy. DHIS2
+# creates its pg_dhis catalog itself but NOT the analytics database; and
+# without spill, the aggregate datavalue load blows the laptop-sized BE
+# memory cap (see docs/doris/spike-findings-2026-07-14.md). Globals persist
+# in FE meta (a volume), but setting them is idempotent so we do it on
+# every create.
+doris_init() {
+  local instance="$1"
+  local container
+  container=$(resolve_doris_container "$instance") || {
+    echo "Error: Doris container for instance $instance not found" >&2
+    return 1
+  }
+  docker exec "$container" mysql -h127.0.0.1 -P9030 -uroot \
+    -e "CREATE DATABASE IF NOT EXISTS analytics;" || return 1
+  # 3.0.x spill variable names (enable_spill does not exist there).
+  docker exec "$container" mysql -h127.0.0.1 -P9030 -uroot \
+    -e "SET GLOBAL enable_force_spill = true;
+        SET GLOBAL enable_sort_spill = true;
+        SET GLOBAL enable_agg_spill = true;
+        SET GLOBAL parallel_pipeline_task_num = 1;" || return 1
+}
+
 # Database readiness check
 wait_for_db() {
   local db_container="$1"
