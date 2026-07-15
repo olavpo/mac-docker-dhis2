@@ -33,7 +33,9 @@ usage() {
   echo "  -t <version>    Tomcat 9 or 10 (usually omit: auto-selected from -v;"
   echo "                  DHIS2 <=2.41 -> 9, >=2.42 -> 10). Default 10 without -v."
   echo "  -m <size>       Java max heap, e.g. 2g (default: 4g / \$D2_DEFAULT_MEMORY)"
+  echo "  -a <backend>    Analytics database backend: doris (requires -v with DHIS2 >= 42)"
   echo "Example: $0 -v 2.42.4 -p 9006 -g 5433 myinstance"
+  echo "Example with Doris analytics: $0 -v 42 -a doris myinstance"
   echo "Example with URL: $0 -l https://example.com/custom.war -p 9006 myinstance"
   echo "Example with custom WAR: $0 -f /path/to/custom.war -p 9006 myinstance"
   echo "Example with DB seed: $0 -s /path/to/seed.sql myinstance"
@@ -51,10 +53,11 @@ PG_PORT=""
 WAR_FILE=""
 TOMCAT_VERSION=""  # empty = not specified; resolved below (auto from -v, else 10)
 MEMORY=""
+ANALYTICS=""
 DEFAULT_MEMORY="${D2_DEFAULT_MEMORY:-4g}"  # Tomcat max heap when -m omitted
 
 # Parse options
-while getopts "v:l:s:p:g:f:t:m:" opt; do
+while getopts "v:l:s:p:g:f:t:m:a:" opt; do
   case $opt in
     v) VERSION=$OPTARG ;;
     l) WAR_URL=$OPTARG ;;
@@ -64,6 +67,7 @@ while getopts "v:l:s:p:g:f:t:m:" opt; do
     f) WAR_FILE=$OPTARG ;;
     t) TOMCAT_VERSION=$OPTARG ;;
     m) MEMORY=$OPTARG ;;
+    a) ANALYTICS=$OPTARG ;;
     *) usage ;;
   esac
 done
@@ -104,6 +108,24 @@ if [ -n "$VERSION" ]; then
 fi
 # Fallback when nothing set it (no -v, or -l/-f WAR sources).
 TOMCAT_VERSION="${TOMCAT_VERSION:-10}"
+
+# Validate the analytics backend request. Done here — before port
+# selection, directory creation, or docker — so error paths have no side
+# effects. Doris analytics needs DHIS2 >= 42 (which also implies Tomcat 10).
+if [ -n "$ANALYTICS" ]; then
+  if [ "$ANALYTICS" != "doris" ]; then
+    echo "Error: -a must be 'doris' (got '$ANALYTICS')" >&2
+    exit 1
+  fi
+  if [ -z "$VERSION" ]; then
+    echo "Error: -a doris requires -v with a DHIS2 version >= 42" >&2
+    exit 1
+  fi
+  if ! [[ "$DHIS_MAJOR" =~ ^[0-9]+$ ]] || [ "$DHIS_MAJOR" -lt 42 ]; then
+    echo "Error: -a doris requires DHIS2 42 or later (got $VERSION, major $DHIS_MAJOR)" >&2
+    exit 1
+  fi
+fi
 
 # Resolve and validate the Tomcat max heap (default 4g; see D2_DEFAULT_MEMORY)
 MEMORY="${MEMORY:-$DEFAULT_MEMORY}"
@@ -185,11 +207,55 @@ echo "  Tomcat Version: $TOMCAT_DISPLAY"
 echo "  HTTP Port: $HTTP_PORT"
 echo "  PostgreSQL Port: $PG_PORT"
 echo "  Tomcat heap:     -Xmx$MEMORY"
+[ -n "$ANALYTICS" ] && echo "  Analytics DB:    $ANALYTICS"
 
 # Copy template files
 cp "${DHIS2_BASE}/_templates/dhis.conf" "$DHIS2_HOME/DHIS2_HOME/dhis.conf"
 cp "${DHIS2_BASE}/_templates/log4j2.xml" "$DHIS2_HOME/DHIS2_HOME/log4j2.xml"
 sed "s/\${INSTANCE_NAME}/$INSTANCE/g" "${DHIS2_BASE}/_templates/server.xml" > "$DHIS2_HOME/server.xml"
+
+# Doris backend: copy conf assets, ensure the Postgres JDBC jar (cached in
+# _templates/doris/, downloaded from Maven Central on first use), activate
+# the compose profile via .env, and point DHIS2 at Doris in dhis.conf.
+if [ "$ANALYTICS" = "doris" ]; then
+  if [ ! -f "${DHIS2_BASE}/_templates/doris/fe.conf" ]; then
+    echo "Error: ${DHIS2_BASE}/_templates/doris/ is missing — run setup.sh update" >&2
+    rm -rf "$DHIS2_HOME"
+    exit 1
+  fi
+  PGJDBC_VERSION="42.7.5"
+  PGJDBC_JAR="postgresql-${PGJDBC_VERSION}.jar"
+  PGJDBC_CACHE="${DHIS2_BASE}/_templates/doris/${PGJDBC_JAR}"
+  if [ ! -f "$PGJDBC_CACHE" ]; then
+    echo "Downloading Postgres JDBC driver ${PGJDBC_VERSION} (for the Doris catalog)..."
+    PGJDBC_URL="https://repo1.maven.org/maven2/org/postgresql/postgresql/${PGJDBC_VERSION}/${PGJDBC_JAR}"
+    curl -fSL --no-progress-meter -o "${PGJDBC_CACHE}.tmp" "$PGJDBC_URL"
+    EXPECTED_SHA=$(curl -fsSL "${PGJDBC_URL}.sha256")
+    ACTUAL_SHA=$(shasum -a 256 "${PGJDBC_CACHE}.tmp" | cut -d' ' -f1)
+    if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+      echo "Error: JDBC driver checksum mismatch (expected $EXPECTED_SHA, got $ACTUAL_SHA)" >&2
+      rm -f "${PGJDBC_CACHE}.tmp"
+      rm -rf "$DHIS2_HOME"
+      exit 1
+    fi
+    mv "${PGJDBC_CACHE}.tmp" "$PGJDBC_CACHE"
+  fi
+  mkdir -p "$DHIS2_HOME/doris"
+  cp "${DHIS2_BASE}/_templates/doris/fe.conf" "$DHIS2_HOME/doris/fe.conf"
+  cp "${DHIS2_BASE}/_templates/doris/be.conf" "$DHIS2_HOME/doris/be.conf"
+  cp "$PGJDBC_CACHE" "$DHIS2_HOME/doris/${PGJDBC_JAR}"
+  # Activates the doris service for every compose invocation in this
+  # directory (startup, shutdown, delete, set-memory) with no flag changes.
+  echo "COMPOSE_PROFILES=analytics-doris" > "$DHIS2_HOME/.env"
+  cat >> "$DHIS2_HOME/DHIS2_HOME/dhis.conf" << 'DORISCONF'
+
+# Apache Doris analytics database (added by d2-instance-create -a doris)
+analytics.database = doris
+analytics.connection.url = jdbc:mysql://doris:9030/analytics?useUnicode=true&characterEncoding=UTF-8&useSSL=false
+analytics.connection.username = root
+analytics.connection.password =
+DORISCONF
+fi
 
 # Select appropriate template based on Tomcat version
 if [ "$TOMCAT_VERSION" = "9" ]; then
@@ -222,6 +288,19 @@ DB_CONTAINER=$(resolve_db_container "$INSTANCE") || {
 if ! wait_for_db "$DB_CONTAINER"; then
   echo "Error: Database did not become ready in time"
   exit 1
+fi
+
+# Doris: create the analytics database (DHIS2 only creates its catalog)
+# and set laptop-sized spill globals. compose up already waited for the
+# Doris healthcheck (BE alive) via the tomcat depends_on, so this can run
+# immediately. Must happen before the WAR boots, or DHIS2's analytics
+# runs would fail against a missing database.
+if [ "$ANALYTICS" = "doris" ]; then
+  echo "Initializing Doris analytics database..."
+  if ! doris_init "$INSTANCE"; then
+    echo "Error: Doris initialization failed" >&2
+    exit 1
+  fi
 fi
 
 # Deploy WAR file and/or restore database if specified
@@ -277,6 +356,10 @@ echo "✅ DHIS2 instance $INSTANCE created successfully with Tomcat $TOMCAT_DISP
 echo "  Access:       http://localhost:$HTTP_PORT"
 echo "  dev-net:      http://dhis2-$INSTANCE:8080 (reachable from containers on dev-net)"
 echo "  PostgreSQL:   localhost:$PG_PORT (user: dhis, password: dhis, db: dhis2)"
+if [ "$ANALYTICS" = "doris" ]; then
+  echo "  Doris:        doris:9030 inside the instance network (MySQL protocol, root, empty password)"
+  echo "                dev-net: dhis2-$INSTANCE-doris:9030"
+fi
 echo "  DHIS2_HOME:   $DHIS2_HOME/DHIS2_HOME/"
 
 

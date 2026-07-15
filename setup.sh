@@ -50,7 +50,8 @@ create_symlinks() {
 
 copy_templates() {
   mkdir -p "$DHIS2_BASE/_templates"
-  cp -f "$SCRIPT_DIR/_templates/"* "$DHIS2_BASE/_templates/"
+  # -R: _templates now contains subdirectories (doris/)
+  cp -Rf "$SCRIPT_DIR/_templates/"* "$DHIS2_BASE/_templates/"
   echo "  Templates copied to $DHIS2_BASE/_templates/"
 }
 
@@ -63,7 +64,9 @@ copy_new_templates() {
     local name
     name=$(basename "$tpl")
     if [ ! -e "$DHIS2_BASE/_templates/$name" ]; then
-      cp "$tpl" "$DHIS2_BASE/_templates/$name"
+      # -R: a new subdirectory (e.g. doris/) is copied whole; existing
+      # entries are left untouched by the guard above.
+      cp -R "$tpl" "$DHIS2_BASE/_templates/$name"
       echo "  Added new template: $name"
       added=$((added + 1))
     fi
