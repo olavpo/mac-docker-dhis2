@@ -31,7 +31,7 @@
 **Interfaces:**
 - Produces: `_templates/doris/` directory that `setup.sh` copies to `$DHIS2_BASE/_templates/doris/` and `d2-instance-create` copies into `$DHIS2_BASE/<instance>/doris/`.
 
-- [ ] **Step 1: Write `_templates/doris/fe.conf`** — spike-verified content; `priority_networks` intentionally absent (the all-in-one entrypoint appends its own `127.0.0.1/24`, and a duplicate key would be ambiguous):
+- [x] **Step 1: Write `_templates/doris/fe.conf`** — spike-verified content; `priority_networks` intentionally absent (the all-in-one entrypoint appends its own `127.0.0.1/24`, and a duplicate key would be ambiguous):
 
 ```
 #####################################################################
@@ -64,7 +64,7 @@ sys_log_mode = ASYNC
 lower_case_table_names = 1
 ```
 
-- [ ] **Step 2: Write `_templates/doris/be.conf`**:
+- [x] **Step 2: Write `_templates/doris/be.conf`**:
 
 ```
 # Doris BE config for DHIS2 test instances — based on dhis2-core
@@ -82,9 +82,9 @@ sys_log_roll_num = 5
 sys_log_roll_interval = DAY
 ```
 
-- [ ] **Step 3: Verify** — `grep -c priority_networks _templates/doris/fe.conf` prints `1` (only the comment mention; no active key: `grep -E '^priority_networks' _templates/doris/fe.conf` prints nothing) and `grep -q 'mem_limit = 2800M' _templates/doris/be.conf`.
+- [x] **Step 3: Verify** — `grep -c priority_networks _templates/doris/fe.conf` prints `1` (only the comment mention; no active key: `grep -E '^priority_networks' _templates/doris/fe.conf` prints nothing) and `grep -q 'mem_limit = 2800M' _templates/doris/be.conf`.
 
-- [ ] **Step 4: Commit** — `git add _templates/doris && git commit -m "templates: Doris fe/be conf for -a doris instances"` (+ Co-Authored-By trailer).
+- [x] **Step 4: Commit** — `git add _templates/doris && git commit -m "templates: Doris fe/be conf for -a doris instances"` (+ Co-Authored-By trailer).
 
 ---
 
@@ -97,7 +97,7 @@ sys_log_roll_interval = DAY
 - Consumes: `_templates/doris/*` (Task 1) mounted from the instance-local `./doris/` copy.
 - Produces: compose profile name `analytics-doris` (exact string used by `.env` in Task 4 and broker detection in Task 5); container name pattern `<instance>-doris-1`; dev-net alias `dhis2-<instance>-doris`.
 
-- [ ] **Step 1: Add the `doris` service** between `db:` and `tomcat:`:
+- [x] **Step 1: Add the `doris` service** between `db:` and `tomcat:`:
 
 ```yaml
   # Optional Apache Doris analytics backend (DHIS2 >= 42). Activated by
@@ -139,7 +139,7 @@ sys_log_roll_interval = DAY
           - dhis2-${INSTANCE_NAME}-doris
 ```
 
-- [ ] **Step 2: Add the conditional dependency to `tomcat`** (replace the existing `depends_on` block):
+- [x] **Step 2: Add the conditional dependency to `tomcat`** (replace the existing `depends_on` block):
 
 ```yaml
     depends_on:
@@ -153,7 +153,7 @@ sys_log_roll_interval = DAY
         required: false
 ```
 
-- [ ] **Step 3: Add the volumes**:
+- [x] **Step 3: Add the volumes**:
 
 ```yaml
 volumes:
@@ -162,7 +162,7 @@ volumes:
   doris_be_storage:
 ```
 
-- [ ] **Step 4: Verify both profile states render.** Render the template the way `d2-instance-create` does, then `docker compose config` both ways:
+- [x] **Step 4: Verify both profile states render.** Render the template the way `d2-instance-create` does, then `docker compose config` both ways:
 
 ```bash
 cd "$(mktemp -d)" && mkdir doris && touch doris/fe.conf doris/be.conf doris/postgresql-42.7.5.jar
@@ -177,7 +177,7 @@ COMPOSE_PROFILES=analytics-doris docker compose config --services | grep -c dori
 
 Expected: both `OK` lines, then `0` and `1`.
 
-- [ ] **Step 5: Commit** — `git commit -m "templates: optional Doris service behind analytics-doris profile (tomcat10)"`.
+- [x] **Step 5: Commit** — `git commit -m "templates: optional Doris service behind analytics-doris profile (tomcat10)"`.
 
 ---
 
@@ -189,7 +189,7 @@ Expected: both `OK` lines, then `0` and `1`.
 **Interfaces:**
 - Produces: `resolve_doris_container <instance>` (echoes container name or returns 1) and `doris_init <instance>` (creates the `analytics` DB + sets spill globals; returns non-zero on failure). Consumed by Task 4.
 
-- [ ] **Step 1: Append to `d2-lib.sh`:**
+- [x] **Step 1: Append to `d2-lib.sh`:**
 
 ```bash
 # Doris (analytics backend) container for an instance, if any.
@@ -228,9 +228,9 @@ doris_init() {
 }
 ```
 
-- [ ] **Step 2: Verify syntax** — `bash -n bash-scripts-docker/d2-lib.sh` (no output).
+- [x] **Step 2: Verify syntax** — `bash -n bash-scripts-docker/d2-lib.sh` (no output).
 
-- [ ] **Step 3: Commit** — `git commit -m "lib: resolve_doris_container + doris_init helpers"`.
+- [x] **Step 3: Commit** — `git commit -m "lib: resolve_doris_container + doris_init helpers"`.
 
 ---
 
@@ -243,9 +243,9 @@ doris_init() {
 - Consumes: `doris_init` (Task 3), `_templates/doris/*` (Task 1), profile name `analytics-doris` (Task 2).
 - Produces: `-a <backend>` CLI flag; instance-side artifacts: `$DHIS2_HOME/doris/{fe.conf,be.conf,postgresql-42.7.5.jar}`, `$DHIS2_HOME/.env`, dhis.conf `analytics.*` block. The broker (Task 5) passes `-a doris` through.
 
-- [ ] **Step 1: Add the option.** Usage text gets `echo "  -a <backend>    Analytics database backend: doris (requires -v with DHIS2 >= 42)"`; defaults gain `ANALYTICS=""`; getopts string becomes `"v:l:s:p:g:f:t:m:a:"` with case arm `a) ANALYTICS=$OPTARG ;;`.
+- [x] **Step 1: Add the option.** Usage text gets `echo "  -a <backend>    Analytics database backend: doris (requires -v with DHIS2 >= 42)"`; defaults gain `ANALYTICS=""`; getopts string becomes `"v:l:s:p:g:f:t:m:a:"` with case arm `a) ANALYTICS=$OPTARG ;;`.
 
-- [ ] **Step 2: Validate before any side effects** (immediately after the Tomcat/-t reconciliation block, before port selection):
+- [x] **Step 2: Validate before any side effects** (immediately after the Tomcat/-t reconciliation block, before port selection):
 
 ```bash
 # Validate the analytics backend request. Done here — before port
@@ -267,7 +267,7 @@ if [ -n "$ANALYTICS" ]; then
 fi
 ```
 
-- [ ] **Step 3: Materialize Doris assets** (after the existing "Copy template files" block):
+- [x] **Step 3: Materialize Doris assets** (after the existing "Copy template files" block):
 
 ```bash
 # Doris backend: copy conf assets, ensure the Postgres JDBC jar (cached in
@@ -311,7 +311,7 @@ fi
 Note: the jar cache lives under `$DHIS2_BASE/_templates/doris/`, which `setup.sh install/update` also populates with fe.conf/be.conf — `copy_new_templates` copies files, so also change `setup.sh`'s `copy_templates`/`copy_new_templates` to use `cp -R` so the `doris/` subdirectory is included:
 in `copy_templates`: `cp -Rf "$SCRIPT_DIR/_templates/"* "$DHIS2_BASE/_templates/"`; in `copy_new_templates`, the existing per-entry loop already iterates `"$SCRIPT_DIR/_templates/"*` — change its `cp "$tpl" ...` to `cp -R "$tpl" ...` (a new `doris` dir is copied whole; an existing one is left untouched by the `[ ! -e ]` guard).
 
-- [ ] **Step 4: Initialize Doris after boot.** `docker compose up -d` already blocks until the Doris healthcheck passes (verified compose behavior), so right after the existing `wait_for_db` block add:
+- [x] **Step 4: Initialize Doris after boot.** `docker compose up -d` already blocks until the Doris healthcheck passes (verified compose behavior), so right after the existing `wait_for_db` block add:
 
 ```bash
 # Doris: create the analytics database (DHIS2 only creates its catalog)
@@ -328,7 +328,7 @@ if [ "$ANALYTICS" = "doris" ]; then
 fi
 ```
 
-- [ ] **Step 5: Extend the create banner and final output.** Banner: `[ -n "$ANALYTICS" ] && echo "  Analytics DB:    $ANALYTICS"`. Final output, after the PostgreSQL line:
+- [x] **Step 5: Extend the create banner and final output.** Banner: `[ -n "$ANALYTICS" ] && echo "  Analytics DB:    $ANALYTICS"`. Final output, after the PostgreSQL line:
 
 ```bash
 if [ "$ANALYTICS" = "doris" ]; then
@@ -337,7 +337,7 @@ if [ "$ANALYTICS" = "doris" ]; then
 fi
 ```
 
-- [ ] **Step 6: Verify validation fails cleanly (no side effects):**
+- [x] **Step 6: Verify validation fails cleanly (no side effects):**
 
 ```bash
 cd bash-scripts-docker
@@ -348,7 +348,7 @@ ls "$DHIS2_BASE" | grep -c atest1                          # expect 0 (nothing c
 bash -n d2-instance-create
 ```
 
-- [ ] **Step 7: Commit** — `git commit -m "d2-instance-create: -a doris analytics backend (compose profile + init)"`.
+- [x] **Step 7: Commit** — `git commit -m "d2-instance-create: -a doris analytics backend (compose profile + init)"`.
 
 ---
 
@@ -362,7 +362,7 @@ bash -n d2-instance-create
 - Consumes: `-a doris` flag (Task 4); `.env` written with `COMPOSE_PROFILES=analytics-doris` (Task 4).
 - Produces: `POST /instances` body key `"analytics"`; `GET /instances` element key `"analytics"` (`"doris"` or `null`); env var `D2_BROKER_MAX_AGENT_DORIS` (default 1); pure helpers `parse_analytics_profiles(env_text)` and `analytics_request_error(analytics, version)`.
 
-- [ ] **Step 1: Write failing tests** (append to `test_d2_broker.py`):
+- [x] **Step 1: Write failing tests** (append to `test_d2_broker.py`):
 
 ```python
 class ParseAnalyticsProfiles(unittest.TestCase):
@@ -409,9 +409,9 @@ class AnalyticsRequestError(unittest.TestCase):
         self.assertIsNotNone(broker.analytics_request_error("doris", "abc"))
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cd bash-scripts-docker && python3 -m unittest test_d2_broker -v 2>&1 | tail -3` → `AttributeError: ... parse_analytics_profiles`.
+- [x] **Step 2: Run to verify failure** — `cd bash-scripts-docker && python3 -m unittest test_d2_broker -v 2>&1 | tail -3` → `AttributeError: ... parse_analytics_profiles`.
 
-- [ ] **Step 3: Implement in `d2-broker`** (after `extract_target_major`):
+- [x] **Step 3: Implement in `d2-broker`** (after `extract_target_major`):
 
 ```python
 ANALYTICS_BACKENDS = ("doris",)
@@ -482,9 +482,9 @@ In `create_instance()`, after the version validation block and before the war_ur
             argv += ["-a", str(analytics)]
 ```
 
-- [ ] **Step 4: Run tests** — `python3 -m unittest test_d2_broker -v 2>&1 | tail -3` → `OK` (all existing tests still pass).
+- [x] **Step 4: Run tests** — `python3 -m unittest test_d2_broker -v 2>&1 | tail -3` → `OK` (all existing tests still pass).
 
-- [ ] **Step 5: Commit** — `git commit -m "broker: analytics=doris create param, analytics field, agent Doris cap"`.
+- [x] **Step 5: Commit** — `git commit -m "broker: analytics=doris create param, analytics field, agent Doris cap"`.
 
 ---
 
@@ -496,9 +496,9 @@ In `create_instance()`, after the version validation block and before the war_ur
 - Modify: `README.md` — `-a doris` in the create examples + one-line description; also fix the two broken `broker.md` links to `docs/broker.md` and mention `setup.sh` in Quick Setup (pre-existing doc drift, one-line fixes while here).
 - Modify: `skills/dhis2-instances/SKILL.md` — new "Doris analytics backend" section: request with `"analytics":"doris"` (version 42+), expect `analytics` field, ~5.5 GB footprint / cap of 1, v42 routes only aggregate+completeness to Doris (events/enrollment/TE stay in Postgres until 43), verify via `POST /api/resourceTables/analytics` then compare `SELECT count(*) FROM analytics.analytics` over `dhis2-<name>-doris:9030` (mysql protocol, root, empty password) — and the Tomcat-restart-after-Doris-recreate gotcha.
 
-- [ ] **Step 1: Write all four doc changes** (content per file summary above; keep each addition under ~25 lines, matching existing doc voice).
-- [ ] **Step 2: Verify** — `grep -rn "analytics" docs/broker.md docs/broker-api.md README.md skills/dhis2-instances/SKILL.md | grep -ci doris` ≥ 8; `grep -c "docs/broker.md" README.md` = 2.
-- [ ] **Step 3: Commit** — `git commit -m "docs: -a doris / analytics param in README, broker docs, dhis2-instances skill"`.
+- [x] **Step 1: Write all four doc changes** (content per file summary above; keep each addition under ~25 lines, matching existing doc voice).
+- [x] **Step 2: Verify** — `grep -rn "analytics" docs/broker.md docs/broker-api.md README.md skills/dhis2-instances/SKILL.md | grep -ci doris` ≥ 8; `grep -c "docs/broker.md" README.md` = 2.
+- [x] **Step 3: Commit** — `git commit -m "docs: -a doris / analytics param in README, broker docs, dhis2-instances skill"`.
 
 ---
 
@@ -506,11 +506,11 @@ In `create_instance()`, after the version validation block and before the war_ur
 
 **Files:** none (verification only; uses the host Docker + broker)
 
-- [ ] **Step 1: Free memory** — `d2-shutdown doris-spike` (the spike instance's 5.5 GB Doris; instance is kept on disk).
-- [ ] **Step 2: Create via the new flag** — `d2-instance-create -v 42 -m 2g -a doris -s "$DHIS2_BASE/_seeds/dhis2-db-sierra-leone_v42.sql.gz" doris-e2e`; expect the banner to show `Analytics DB: doris`, compose to wait for Doris health, `Initializing Doris analytics database...`, and a successful create.
-- [ ] **Step 3: Verify wiring** — `SHOW CATALOGS` in `doris-e2e-doris-1` shows `pg_dhis` after DHIS2 boots; `GET /api/system/info` answers 200.
-- [ ] **Step 4: Run the export** — `POST /api/resourceTables/analytics` as `local_admin:district`; poll `/api/system/tasks/ANALYTICS_TABLE` to completion; expect `Analytics tables updated`.
-- [ ] **Step 5: Verify data** — `SELECT count(*) FROM analytics.analytics` in Doris = 4,902,923 (same seed as the spike baseline); one `/api/analytics` spot query returns values.
-- [ ] **Step 6: Broker surface** — restart the broker (`launchctl kickstart -k gui/$(id -u)/org.dhis2.d2-broker`), then with the admin token: `GET /instances` shows `"analytics": "doris"` for doris-e2e and `null` for doris-spike (which has no .env); `POST /instances` with `{"name":"agent-x","version":"2.41","analytics":"doris"}` returns the 400.
-- [ ] **Step 7: Clean up** — `d2-instance-delete doris-e2e`; leave `doris-spike` stopped (user's call to restart or delete).
-- [ ] **Step 8: Mark plan checkboxes done; commit** — `git commit -m "docs(plan): doris analytics backend plan executed"`.
+- [x] **Step 1: Free memory** — `d2-shutdown doris-spike` (the spike instance's 5.5 GB Doris; instance is kept on disk).
+- [x] **Step 2: Create via the new flag** — `d2-instance-create -v 42 -m 2g -a doris -s "$DHIS2_BASE/_seeds/dhis2-db-sierra-leone_v42.sql.gz" doris-e2e`; expect the banner to show `Analytics DB: doris`, compose to wait for Doris health, `Initializing Doris analytics database...`, and a successful create.
+- [x] **Step 3: Verify wiring** — `SHOW CATALOGS` in `doris-e2e-doris-1` shows `pg_dhis` after DHIS2 boots; `GET /api/system/info` answers 200.
+- [x] **Step 4: Run the export** — `POST /api/resourceTables/analytics` as `local_admin:district`; poll `/api/system/tasks/ANALYTICS_TABLE` to completion; expect `Analytics tables updated`.
+- [x] **Step 5: Verify data** — `SELECT count(*) FROM analytics.analytics` in Doris = 4,902,923 (same seed as the spike baseline); one `/api/analytics` spot query returns values.
+- [x] **Step 6: Broker surface** — restart the broker (`launchctl kickstart -k gui/$(id -u)/org.dhis2.d2-broker`), then with the admin token: `GET /instances` shows `"analytics": "doris"` for doris-e2e and `null` for doris-spike (which has no .env); `POST /instances` with `{"name":"agent-x","version":"2.41","analytics":"doris"}` returns the 400.
+- [x] **Step 7: Clean up** — `d2-instance-delete doris-e2e`; leave `doris-spike` stopped (user's call to restart or delete).
+- [x] **Step 8: Mark plan checkboxes done; commit** — `git commit -m "docs(plan): doris analytics backend plan executed"`.
