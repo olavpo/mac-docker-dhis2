@@ -41,25 +41,37 @@ if [ -d "$DHIS2_BASE/$INSTANCE_NAME" ]; then
   exit 1
 fi
 
+# The temp instance must not outlive this script, whatever the exit path
+# (error, Ctrl-C, kill) — trap-based cleanup instead of per-error deletes.
+CREATED=0
+cleanup() {
+  if [ "$CREATED" -eq 1 ]; then
+    "$SCRIPT_DIR/d2-instance-delete" "$INSTANCE_NAME" || true
+  fi
+}
+trap cleanup EXIT
+# An untrapped signal would skip the EXIT trap; route through exit instead.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # Create temporary instance for version detection
 echo "Creating temporary instance $INSTANCE_NAME..."
 if ! "$SCRIPT_DIR/d2-instance-create" "$INSTANCE_NAME"; then
   echo "ERROR: Failed to create temporary instance"
   exit 1
 fi
+CREATED=1
 
 # Restore the database
 echo "Restoring database from $BACKUP_FILE..."
 if ! "$SCRIPT_DIR/d2-db-restore" "$INSTANCE_NAME" "$BACKUP_FILE"; then
   echo "ERROR: Failed to restore database"
-  "$SCRIPT_DIR/d2-instance-delete" "$INSTANCE_NAME"
   exit 1
 fi
 
 # Get the version from flyway_schema_history
 if ! DB_CONTAINER=$(resolve_db_container "$INSTANCE_NAME" 2>/dev/null); then
   echo "ERROR: Could not resolve database container"
-  "$SCRIPT_DIR/d2-instance-delete" "$INSTANCE_NAME"
   exit 1
 fi
 
@@ -67,7 +79,6 @@ fi
 echo "Waiting for database to be ready..."
 if ! wait_for_db "$DB_CONTAINER"; then
   echo "ERROR: Database not ready"
-  "$SCRIPT_DIR/d2-instance-delete" "$INSTANCE_NAME"
   exit 1
 fi
 
@@ -76,12 +87,8 @@ MAJOR_VERSION=$(get_db_major_version "$DB_CONTAINER") || true
 
 if [ -z "$MAJOR_VERSION" ]; then
   echo "ERROR: Could not determine version from database"
-  "$SCRIPT_DIR/d2-instance-delete" "$INSTANCE_NAME"
   exit 1
 fi
-
-# Clean up
-"$SCRIPT_DIR/d2-instance-delete" "$INSTANCE_NAME"
 
 echo "Major Version: $MAJOR_VERSION"
 

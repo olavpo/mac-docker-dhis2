@@ -32,6 +32,10 @@ timeout_exec() {
     if [ $elapsed -ge $timeout ]; then
       echo "❌ Timeout: Operation took longer than ${timeout} seconds"
       kill $pid 2>/dev/null
+      # Killing the local docker exec client does not stop the server-side
+      # psql/pg_restore; terminate its backends so the restore actually ends.
+      docker exec "$DB_CONTAINER" psql -U dhis -d postgres -c \
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'dhis2';" >/dev/null 2>&1 || true
       return 1
     fi
     
@@ -79,20 +83,6 @@ if [ ! -f "$DUMP_FILE" ]; then
   exit 1
 fi
 
-# Create temp directory in instance home
-mkdir -p "$DHIS2_HOME/temp"
-TEMP_SQL="$DHIS2_HOME/temp/restore.sql"
-
-# Extract dump if gzipped
-if [[ "$DUMP_FILE" == *.gz ]]; then
-  gunzip -c "$DUMP_FILE" > "$TEMP_SQL"
-elif [[ "$DUMP_FILE" == *.pgc ]]; then
-  # .pgc is PostgreSQL custom format, keep as is for pg_restore
-  cp "$DUMP_FILE" "$TEMP_SQL"
-else
-  cp "$DUMP_FILE" "$TEMP_SQL"
-fi
-
 # Check if database container exists
 DB_CONTAINER=$(resolve_db_container "$INSTANCE") || {
   echo "Error: Database container for instance $INSTANCE not found"
@@ -108,10 +98,17 @@ if [ -n "$TOMCAT_CONTAINER" ]; then
   docker stop "$TOMCAT_CONTAINER" >/dev/null 2>&1 || true
 fi
 
-# Copy dump to container and restore
-echo "Copying dump file to container..."
 RESTORE_LOG="$DHIS2_HOME/logs/database-restore-$(date +%Y%m%d-%H%M%S).log"
-docker cp "$TEMP_SQL" "$DB_CONTAINER:/tmp/restore.sql" >/dev/null
+mkdir -p "$DHIS2_HOME/logs"
+
+# Only custom-format dumps are copied into the container: parallel
+# pg_restore (-j) needs a seekable file. Plain SQL (.sql/.sql.gz) is
+# streamed straight into psql instead — no gunzipped temp copy, no
+# docker cp duplicate (matters for multi-GB dumps).
+if [[ "$DUMP_FILE" == *.pgc ]]; then
+  echo "Copying dump file to container..."
+  docker cp "$DUMP_FILE" "$DB_CONTAINER:/tmp/restore.pgc" >/dev/null
+fi
 echo "Restoring database..."
 
 # Drop existing database and create a fresh one to avoid conflicts
@@ -128,18 +125,31 @@ docker exec "$DB_CONTAINER" psql -U dhis -d postgres -c "CREATE DATABASE dhis2;"
 RESTORE_TIMEOUT=28800
 RESTORE_FAILED=0
 
+# Streaming restore commands, run as functions so timeout_exec can
+# background them ($DUMP_FILE / $DB_CONTAINER are set by now).
+restore_stream_gz() {
+  gunzip -c "$DUMP_FILE" | docker exec -i "$DB_CONTAINER" psql -U dhis -d dhis2
+}
+restore_stream_sql() {
+  docker exec -i "$DB_CONTAINER" psql -U dhis -d dhis2 < "$DUMP_FILE"
+}
+
 if [[ "$DUMP_FILE" == *.pgc ]]; then
   # Use pg_restore for PostgreSQL custom format
   echo "Using pg_restore for PostgreSQL custom format..."
   echo "This may take several minutes depending on database size..."
   # Use --no-owner to avoid ownership errors when postgres role doesn't exist
-  if ! timeout_exec $RESTORE_TIMEOUT docker exec "$DB_CONTAINER" pg_restore -U dhis -d dhis2 -j 4 --no-owner /tmp/restore.sql > "$RESTORE_LOG" 2>&1; then
+  if ! timeout_exec $RESTORE_TIMEOUT docker exec "$DB_CONTAINER" pg_restore -U dhis -d dhis2 -j 4 --no-owner /tmp/restore.pgc > "$RESTORE_LOG" 2>&1; then
+    RESTORE_FAILED=1
+  fi
+elif [[ "$DUMP_FILE" == *.gz ]]; then
+  echo "Streaming gzipped SQL into psql..."
+  if ! timeout_exec $RESTORE_TIMEOUT restore_stream_gz > "$RESTORE_LOG" 2>&1; then
     RESTORE_FAILED=1
   fi
 else
-  # Use psql for plain SQL files
-  echo "Using psql for SQL format..."
-  if ! timeout_exec $RESTORE_TIMEOUT docker exec "$DB_CONTAINER" psql -U dhis -d dhis2 -f /tmp/restore.sql > "$RESTORE_LOG" 2>&1; then
+  echo "Streaming SQL into psql..."
+  if ! timeout_exec $RESTORE_TIMEOUT restore_stream_sql > "$RESTORE_LOG" 2>&1; then
     RESTORE_FAILED=1
   fi
 fi
@@ -151,16 +161,14 @@ if [ "$RESTORE_FAILED" -ne 0 ]; then
   tail -20 "$RESTORE_LOG"
   
   # Clean up before exiting
-  docker exec "$DB_CONTAINER" rm /tmp/restore.sql 2>/dev/null
-  rm -f "$TEMP_SQL"
+  docker exec "$DB_CONTAINER" rm -f /tmp/restore.pgc 2>/dev/null || true
   exit 1
 fi
 
 echo "✅ Database restoration completed successfully!"
 
 # Clean up
-docker exec "$DB_CONTAINER" rm /tmp/restore.sql
-rm -f "$TEMP_SQL"
+docker exec "$DB_CONTAINER" rm -f /tmp/restore.pgc 2>/dev/null || true
 
 # Ensure the known local_admin superuser exists regardless of what was
 # restored. Tomcat is still stopped here, so the restart below rebuilds the
