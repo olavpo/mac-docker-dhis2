@@ -112,9 +112,9 @@ fi
 
 ### Task 10: Bash tests + CI
 
-**Files:** Create: `bash-scripts-docker/test_d2_lib.sh`, `.github/workflows/ci.yml`
+**Files:** Create: `bash-scripts-docker/test_d2_lib.sh`. ~~`.github/workflows/ci.yml`~~ (CI workflow skipped per user, 2026-07-15)
 
 - [x] `test_d2_lib.sh`: assert-based tests for the offline paths of `normalize_version` (`41.2`→`2.41.2`, `2.42.4`→`2.42.4`), `dhis2_major` (`2.42.4`→42, `42`→42, `41.4`→41), `required_tomcat_for_major` (41→9, 42→10, junk→10), plus the name regex used in Task 1.
-- [x] CI workflow: ubuntu-latest; shellcheck on `bash-scripts-docker/d2-*` + `setup.sh`; `python3 -m unittest test_d2_broker`; `bash test_d2_lib.sh`.
+- [x] ~~CI workflow~~ Skipped per user. Local equivalents: `shellcheck --exclude=SC1091` on the bash scripts, `python3 -m unittest test_d2_broker`, `bash test_d2_lib.sh`.
 - [x] Fix/annotate anything shellcheck flags until clean.
 - [x] Commit.
