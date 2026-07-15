@@ -342,7 +342,7 @@ fi
 if [ -n "$VERSION" ] && [ -z "$DB_SEED" ]; then
   echo "Waiting for DHIS2 to initialize before adding local_admin..."
   la_done=0
-  for i in $(seq 1 60); do
+  for _ in $(seq 1 60); do
     code=$(curl -s -u admin:district -o /dev/null -w '%{http_code}' \
            "http://localhost:$HTTP_PORT/api/system/info" || true)
     if [ "$code" = "200" ]; then

@@ -44,6 +44,7 @@ fi
 # The temp instance must not outlive this script, whatever the exit path
 # (error, Ctrl-C, kill) — trap-based cleanup instead of per-error deletes.
 CREATED=0
+# shellcheck disable=SC2329  # invoked via the EXIT trap below
 cleanup() {
   if [ "$CREATED" -eq 1 ]; then
     "$SCRIPT_DIR/d2-instance-delete" "$INSTANCE_NAME" || true

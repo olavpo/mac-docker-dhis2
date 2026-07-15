@@ -19,6 +19,7 @@ LA_ROLE_NAME="local_admin superuser"
 # bcrypt hash of 'district' (a valid, portable $2a$ bcrypt — verified against a
 # stock DHIS2 admin/district). Single-quoted so the $-sequences stay literal;
 # referenced via ${LA_PW_HASH} in the heredocs, never embedded raw.
+# shellcheck disable=SC2016  # bcrypt hash: the $-sequences must stay literal
 LA_PW_HASH='$2a$10$Lsc9IyMftwe/8LaTSbfKn.k0XB4.lr7yyADTEVh3HsjVUzIp6ttzK'
 
 if [ -z "${DHIS2_BASE:-}" ]; then
@@ -49,7 +50,8 @@ if [ "$(docker inspect -f '{{.State.Status}}' "$DB_CONTAINER" 2>/dev/null)" != "
   exit 1
 fi
 
-psql_exec() { docker exec -i "$DB_CONTAINER" psql -U dhis -d dhis2 -v ON_ERROR_STOP=1 "$@"; }
+# Only ever fed heredocs on stdin, hence no argument passthrough.
+psql_exec() { docker exec -i "$DB_CONTAINER" psql -U dhis -d dhis2 -v ON_ERROR_STOP=1; }
 
 la_add() {
   psql_exec <<SQL
