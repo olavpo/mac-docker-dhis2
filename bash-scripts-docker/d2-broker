@@ -121,10 +121,18 @@ def run_out(argv, timeout=30):
     ).stdout
 
 
+def parse_host_port(out):
+    """First host port in `docker port` output, whatever the address family
+    ('0.0.0.0:9010', '[::]:9010', '127.0.0.1:8080'). None if no mapping."""
+    for line in out.splitlines():
+        m = re.search(r":(\d+)$", line.strip())
+        if m:
+            return int(m.group(1))
+    return None
+
+
 def container_port(container, internal):
-    out = run_out(["docker", "port", container, internal])
-    m = re.search(r"0\.0\.0\.0:(\d+)", out)
-    return int(m.group(1)) if m else None
+    return parse_host_port(run_out(["docker", "port", container, internal]))
 
 
 def container_state(container):

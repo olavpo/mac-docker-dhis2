@@ -41,15 +41,16 @@ for INSTANCE in $INSTANCES; do
     DB_CONTAINER=""
   fi
   
-  # Get host-facing ports (extract from 0.0.0.0:HOST_PORT)
+  # Get host-facing ports (first mapping line, any address family — an
+  # IPv6-only binding like [::]:9010 still counts)
   if [ -n "$TOMCAT_CONTAINER" ]; then
-    HTTP_PORT=$(docker port "$TOMCAT_CONTAINER" 8080/tcp 2>/dev/null | grep -m1 '0\.0\.0\.0:' | sed 's/.*:\([0-9]*\)$/\1/' || echo "-")
+    HTTP_PORT=$(docker port "$TOMCAT_CONTAINER" 8080/tcp 2>/dev/null | grep -m1 -E ':[0-9]+$' | sed 's/.*:\([0-9]*\)$/\1/' || echo "-")
   else
     HTTP_PORT="-"
   fi
-  
+
   if [ -n "$DB_CONTAINER" ]; then
-    PG_PORT=$(docker port "$DB_CONTAINER" 5432/tcp 2>/dev/null | grep -m1 '0\.0\.0\.0:' | sed 's/.*:\([0-9]*\)$/\1/' || echo "-")
+    PG_PORT=$(docker port "$DB_CONTAINER" 5432/tcp 2>/dev/null | grep -m1 -E ':[0-9]+$' | sed 's/.*:\([0-9]*\)$/\1/' || echo "-")
   else
     PG_PORT="-"
   fi

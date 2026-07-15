@@ -186,6 +186,23 @@ class RequiredTomcatMajor(unittest.TestCase):
         self.assertIsNone(broker.required_tomcat_major(None))
 
 
+class ParseHostPort(unittest.TestCase):
+    def test_dual_stack(self):
+        self.assertEqual(broker.parse_host_port("0.0.0.0:9010\n[::]:9010\n"), 9010)
+
+    def test_ipv6_only(self):
+        self.assertEqual(broker.parse_host_port("[::]:9012\n"), 9012)
+
+    def test_specific_ipv4(self):
+        self.assertEqual(broker.parse_host_port("127.0.0.1:8080\n"), 8080)
+
+    def test_empty(self):
+        self.assertIsNone(broker.parse_host_port(""))
+
+    def test_garbage(self):
+        self.assertIsNone(broker.parse_host_port("Error: no such container\n"))
+
+
 class SeedMajor(unittest.TestCase):
     def test_curated_seed(self):
         self.assertEqual(broker.seed_major("dhis2-db-sierra-leone_v42.sql.gz"), 42)
