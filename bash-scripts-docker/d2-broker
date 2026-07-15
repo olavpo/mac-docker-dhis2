@@ -454,6 +454,16 @@ class ApiError(Exception):
         self.message = message
 
 
+def jobs_to_prune(jobs, keep=200):
+    """Ids of terminal jobs beyond the newest `keep` (by created_at) —
+    startup housekeeping so job history doesn't grow forever in memory and
+    under _broker/jobs/. Queued/running jobs are never pruned."""
+    terminal = [j for j in jobs
+                if j.get("status") not in ("queued", "running")]
+    terminal.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+    return [j["id"] for j in terminal[keep:]]
+
+
 class JobManager:
     def __init__(self):
         self.jobs = {}
@@ -476,6 +486,13 @@ class JobManager:
                 self.jobs[job["id"]] = job
             except Exception:
                 continue
+        for job_id in jobs_to_prune(list(self.jobs.values())):
+            del self.jobs[job_id]
+            for suffix in (".json", ".log"):
+                try:
+                    (self.dir / f"{job_id}{suffix}").unlink()
+                except OSError:
+                    pass
 
     def _persist(self, job):
         with open(self.dir / f"{job['id']}.json", "w") as f:

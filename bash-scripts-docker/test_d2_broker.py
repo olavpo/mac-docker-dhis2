@@ -186,6 +186,32 @@ class RequiredTomcatMajor(unittest.TestCase):
         self.assertIsNone(broker.required_tomcat_major(None))
 
 
+class JobsToPrune(unittest.TestCase):
+    @staticmethod
+    def _job(i, status="succeeded"):
+        return {"id": f"j-{i:04d}", "status": status,
+                "created_at": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}+00:00"}
+
+    def test_under_limit_keeps_all(self):
+        jobs = [self._job(i) for i in range(5)]
+        self.assertEqual(broker.jobs_to_prune(jobs, keep=10), [])
+
+    def test_oldest_beyond_keep_pruned(self):
+        jobs = [self._job(i) for i in range(10)]
+        pruned = broker.jobs_to_prune(jobs, keep=7)
+        self.assertEqual(sorted(pruned), ["j-0000", "j-0001", "j-0002"])
+
+    def test_active_jobs_never_pruned(self):
+        jobs = [self._job(0, "running"), self._job(1, "queued")]
+        jobs += [self._job(i) for i in range(2, 10)]
+        pruned = broker.jobs_to_prune(jobs, keep=3)
+        self.assertNotIn("j-0000", pruned)
+        self.assertNotIn("j-0001", pruned)
+        # Oldest terminal ones go, newest 3 stay.
+        self.assertEqual(sorted(pruned),
+                         [f"j-{i:04d}" for i in range(2, 7)])
+
+
 class ParseHostPort(unittest.TestCase):
     def test_dual_stack(self):
         self.assertEqual(broker.parse_host_port("0.0.0.0:9010\n[::]:9010\n"), 9010)
