@@ -131,6 +131,50 @@ class ValidPort(unittest.TestCase):
             self.assertFalse(broker.valid_port(p), p)
 
 
+class ParseAnalyticsProfiles(unittest.TestCase):
+    def test_doris_profile(self):
+        self.assertEqual(
+            broker.parse_analytics_profiles("COMPOSE_PROFILES=analytics-doris\n"),
+            "doris")
+
+    def test_doris_among_multiple_profiles(self):
+        self.assertEqual(
+            broker.parse_analytics_profiles("COMPOSE_PROFILES=foo, analytics-doris ,bar"),
+            "doris")
+
+    def test_no_profile_line(self):
+        self.assertIsNone(broker.parse_analytics_profiles("SOMETHING=else\n"))
+
+    def test_other_profiles_only(self):
+        self.assertIsNone(
+            broker.parse_analytics_profiles("COMPOSE_PROFILES=debug"))
+
+    def test_empty_and_none(self):
+        self.assertIsNone(broker.parse_analytics_profiles(""))
+        self.assertIsNone(broker.parse_analytics_profiles(None))
+
+
+class AnalyticsRequestError(unittest.TestCase):
+    def test_valid_doris_42(self):
+        self.assertIsNone(broker.analytics_request_error("doris", "42"))
+        self.assertIsNone(broker.analytics_request_error("doris", "2.42.4"))
+        self.assertIsNone(broker.analytics_request_error("doris", "2.43"))
+
+    def test_unknown_backend(self):
+        self.assertIn("doris", broker.analytics_request_error("clickhouse", "42"))
+
+    def test_missing_version(self):
+        self.assertIn("version", broker.analytics_request_error("doris", None))
+        self.assertIn("version", broker.analytics_request_error("doris", ""))
+
+    def test_major_below_42(self):
+        self.assertIn("42", broker.analytics_request_error("doris", "2.41"))
+        self.assertIn("42", broker.analytics_request_error("doris", "40"))
+
+    def test_non_numeric_major(self):
+        self.assertIsNotNone(broker.analytics_request_error("doris", "abc"))
+
+
 class RequiredTomcatMajor(unittest.TestCase):
     def test_mapping(self):
         self.assertEqual(broker.required_tomcat_major(40), 9)

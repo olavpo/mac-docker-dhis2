@@ -192,6 +192,7 @@ def list_instances():
             "devnet_url": f"http://dhis2-{inst}:8080" if on_devnet else None,
             "devnet_db": f"dhis2-{inst}-db:5432" if db_on_devnet else None,
             "agent_managed": inst.startswith(AGENT_PREFIX),
+            "analytics": instance_analytics(inst),
         })
     return instances
 
@@ -222,6 +223,46 @@ def extract_target_major(version):
         return int(major)
     except ValueError:
         return None
+
+
+ANALYTICS_BACKENDS = ("doris",)
+DORIS_PROFILE = "analytics-doris"
+
+
+def parse_analytics_profiles(env_text):
+    """Analytics backend implied by a compose .env's COMPOSE_PROFILES line:
+    'doris' if the analytics-doris profile is active, else None."""
+    for line in (env_text or "").splitlines():
+        if line.strip().startswith("COMPOSE_PROFILES="):
+            profiles = line.strip().split("=", 1)[1].split(",")
+            if DORIS_PROFILE in (p.strip() for p in profiles):
+                return "doris"
+    return None
+
+
+def instance_analytics(name):
+    """Analytics backend of an instance ('doris' or None), read from its
+    .env — works for stopped instances, unlike container inspection."""
+    try:
+        return parse_analytics_profiles(
+            (dhis2_base() / name / ".env").read_text())
+    except OSError:
+        return None
+
+
+def analytics_request_error(analytics, version):
+    """Validation message for an analytics-backend create request, else
+    None. Doris needs a resolvable DHIS2 major >= 42, which also excludes
+    war_url/war_file creates (their major is unknowable)."""
+    if analytics not in ANALYTICS_BACKENDS:
+        return f"analytics must be one of: {', '.join(ANALYTICS_BACKENDS)}"
+    if not version:
+        return "analytics requires a 'version' with DHIS2 major >= 42"
+    major = extract_target_major(version)
+    if major is None or major < 42:
+        return (f"analytics backend '{analytics}' requires DHIS2 42 or "
+                f"later (got '{version}')")
+    return None
 
 
 def mem_to_mb(size):
@@ -710,6 +751,28 @@ class Handler(BaseHTTPRequestHandler):
             if not VERSION_RE.match(str(version)):
                 raise ApiError(400, "version must look like 42, 2.42 or 2.42.1")
             argv += ["-v", str(version)]
+        analytics = body.get("analytics")
+        if analytics:
+            err = analytics_request_error(analytics, version)
+            if err:
+                raise ApiError(400, err)
+            if body.get("war_url") or body.get("war_file"):
+                raise ApiError(400, "analytics cannot be combined with "
+                                    "war_url/war_file (a 'version' is how "
+                                    "the 42+ requirement is checked)")
+            if scope == "agent":
+                # A Doris sidecar is a ~5.5 GB tenant; one is all a
+                # laptop-sized Docker VM fits (see
+                # docs/doris/spike-findings-2026-07-14.md).
+                cap = int(os.environ.get("D2_BROKER_MAX_AGENT_DORIS", 1))
+                doris_owned = [i["name"] for i in list_instances()
+                               if i["agent_managed"] and i["analytics"]]
+                if len(doris_owned) >= cap:
+                    raise ApiError(409,
+                                   f"agent Doris-instance cap reached ({cap}); "
+                                   f"Doris needs ~5.5 GB RAM per instance; "
+                                   f"delete one of: {', '.join(doris_owned)}")
+            argv += ["-a", str(analytics)]
         if body.get("war_url") or body.get("war_file"):
             # Arbitrary WAR sources are a supply-chain hole; only the user's
             # own clients get to use them.
