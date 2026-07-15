@@ -27,7 +27,6 @@ usage() {
   echo "  -f <file>    Use local WAR file"
   echo "  -v <version> Download specific DHIS2 version"
   echo "  -l <url>     Download from custom URL"
-  echo "  -p <port>    HTTP port for verification messages (default: 8080)"
   echo "Example: $0 -v 2.42.4 myinstance"
   echo "Example: $0 -f /path/to/custom.war myinstance"
   echo "Example: $0 -l https://example.com/custom.war myinstance"
@@ -38,15 +37,13 @@ usage() {
 WAR_FILE=""
 VERSION=""
 WAR_URL=""
-HTTP_PORT="8080"
 
 # Parse options
-while getopts "f:v:l:p:" opt; do
+while getopts "f:v:l:" opt; do
   case $opt in
     f) WAR_FILE=$OPTARG ;;
     v) VERSION=$OPTARG ;;
     l) WAR_URL=$OPTARG ;;
-    p) HTTP_PORT=$OPTARG ;;
     *) usage ;;
   esac
 done
@@ -143,6 +140,11 @@ rm -f "$TEMP_WAR"
 
 # Restart Tomcat container
 docker start "$CONTAINER" >/dev/null
+
+# Read the instance's real HTTP port for the verification hint (any address
+# family); fall back to the container-internal 8080 if unmapped.
+HTTP_PORT=$(docker port "$CONTAINER" 8080/tcp 2>/dev/null | grep -m1 -E ':[0-9]+$' | sed 's/.*:\([0-9]*\)$/\1/' || true)
+HTTP_PORT="${HTTP_PORT:-8080}"
 
 echo "✅ WAR file deployed to $INSTANCE"
 echo "The container will automatically reload the WAR file."
