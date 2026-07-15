@@ -186,6 +186,46 @@ class RequiredTomcatMajor(unittest.TestCase):
         self.assertIsNone(broker.required_tomcat_major(None))
 
 
+class SeedMajor(unittest.TestCase):
+    def test_curated_seed(self):
+        self.assertEqual(broker.seed_major("dhis2-db-sierra-leone_v42.sql.gz"), 42)
+
+    def test_uppercase_token(self):
+        self.assertEqual(broker.seed_major("dhis2-db-sierra-leone_V40.sql.gz"), 40)
+
+    def test_backup_with_label(self):
+        self.assertEqual(broker.seed_major("acdc_2026-03-03-1200_v41_pre.sql.gz"), 41)
+
+    def test_last_token_wins(self):
+        # An instance named like inst_v41 must not shadow the real version.
+        self.assertEqual(broker.seed_major("inst_v41_2026-03-03_v42.sql.gz"), 42)
+
+    def test_full_path_uses_basename(self):
+        self.assertEqual(broker.seed_major("/x/_seeds/demo_v43.sql"), 43)
+
+    def test_no_token(self):
+        self.assertIsNone(broker.seed_major("plain-dump.sql.gz"))
+
+
+class SeedResetError(unittest.TestCase):
+    def test_newer_seed_refused(self):
+        msg = broker.seed_reset_error(42, 41)
+        self.assertIsNotNone(msg)
+        self.assertIn("42", msg)
+
+    def test_older_seed_ok(self):
+        self.assertIsNone(broker.seed_reset_error(41, 42))
+
+    def test_same_major_ok(self):
+        self.assertIsNone(broker.seed_reset_error(42, 42))
+
+    def test_unknown_seed_skips_guard(self):
+        self.assertIsNone(broker.seed_reset_error(None, 42))
+
+    def test_unknown_instance_skips_guard(self):
+        self.assertIsNone(broker.seed_reset_error(42, None))
+
+
 class SubmitExclusive(unittest.TestCase):
     """submit() itself must reject an instance with an active job (under one
     lock hold) — the handler's early check_no_active_job is not atomic with

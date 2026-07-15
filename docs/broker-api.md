@@ -231,7 +231,13 @@ Restore the DB from a seed. Body:
 To "reset to empty" you delete and re-create instead — `reset` always
 takes a seed.
 
-Returns **202 + job**.
+Returns **202 + job**. Returns **400** if the seed's filename carries a
+`_vNN` version token (all backups made by the broker do, and the curated
+seeds follow the convention) that is **newer** than the instance's current
+DHIS2 major — restoring a newer database than the deployed WAR bricks the
+instance (Flyway can't downgrade). Older seeds are fine; Flyway migrates
+them up on next boot. The guard is skipped when either side is unknown
+(no token in the filename, or the instance's DB is not running).
 
 On restore the broker ensures a known `local_admin` / `district` superuser
 (`ALL` authority) exists regardless of the restored database's own `admin`;

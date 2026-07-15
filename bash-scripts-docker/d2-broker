@@ -225,6 +225,37 @@ def extract_target_major(version):
         return None
 
 
+# _vNN version token that d2-db-backup puts in backup filenames and the
+# curated seeds follow by convention (dhis2-db-sierra-leone_v42.sql.gz).
+SEED_MAJOR_RE = re.compile(r"_v(\d+)(?=[._-]|$)", re.I)
+
+
+def seed_major(filename):
+    """DHIS2 major encoded in a seed/backup filename via its _vNN token,
+    or None. The last token wins, so an instance name that itself contains
+    _vNN (backup files start with the instance name) can't shadow the real
+    version suffix."""
+    matches = SEED_MAJOR_RE.findall(Path(filename).name)
+    return int(matches[-1]) if matches else None
+
+
+def seed_reset_error(seed_maj, cur_maj):
+    """Refuse restoring a seed from a NEWER DHIS2 major than the instance
+    runs: Flyway can't downgrade, so the instance boots into 'database is
+    newer than the WAR' and is bricked until upgraded (the reverse — an
+    older seed — is fine; Flyway migrates it up on boot). Both sides are
+    heuristics (filename token / flyway table), so None on either side
+    skips the guard."""
+    if seed_maj is None or cur_maj is None:
+        return None
+    if seed_maj > cur_maj:
+        return (f"seed looks like DHIS2 {seed_maj} (filename token "
+                f"_v{seed_maj}) but the instance runs {cur_maj}; restoring "
+                f"a newer database than the deployed WAR bricks the "
+                f"instance. Upgrade it first or pick a <= {cur_maj} seed.")
+    return None
+
+
 ANALYTICS_BACKENDS = ("doris",)
 DORIS_PROFILE = "analytics-doris"
 
@@ -874,6 +905,14 @@ class Handler(BaseHTTPRequestHandler):
         self.require_instance(name)
         self.check_no_active_job(name)
         seed_path, pre_steps, cleanup = self.prepare_seed(str(seed), scope)
+        # Same class of guard as upgrade's transition_error: a v42+ seed
+        # restored into a v41 instance bricks it. Heuristic on the _vNN
+        # filename token; silently skipped when either side is unknown.
+        cur = instance_version(name)
+        cur_major = int(cur) if cur and cur.isdigit() else None
+        err = seed_reset_error(seed_major(seed_path), cur_major)
+        if err:
+            raise ApiError(400, err)
         argv = [str(SCRIPT_DIR / "d2-db-restore"), name, seed_path]
         job = self.jobs.submit("reset", name, pre_steps + [argv],
                                cleanup=cleanup)

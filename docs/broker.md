@@ -109,7 +109,7 @@ stable resolved from releases.dhis2.org) or an exact release (`2.42.4`).
 | `GET /health` | Liveness (no auth) |
 | `GET /instances[?full=1]` | List instances (agent scope: `agent-*` only). `full=1` adds `dhis2_major_version` (slower) |
 | `POST /instances` | Create. Body: `{"name", "version"?, "seed"?, "tomcat"?, "memory"?, "http_port"?, "pg_port"?, "analytics"?, "war_url"?†, "war_file"?†}` → 202 job |
-| `POST /instances/<name>/reset` | Restore DB from a seed. Body: `{"seed"}` → 202 job |
+| `POST /instances/<name>/reset` | Restore DB from a seed. Body: `{"seed"}` → 202 job. 400 if the seed's `_vNN` filename token is newer than the instance's DHIS2 major (a newer DB than the WAR bricks the instance) |
 | `POST /instances/<name>/start` | `docker compose up -d` → 202 job |
 | `POST /instances/<name>/stop` | `docker compose down` → 202 job |
 | `DELETE /instances/<name>` | Stop, remove containers+volumes, delete dir → 202 job |
