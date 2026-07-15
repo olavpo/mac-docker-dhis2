@@ -119,6 +119,32 @@ instance, delete and re-create. The job `result` carries a best-effort
 finish — confirm the upgrade landed by polling `GET /instances?full=1` (or
 `/api/system/info`) until it reports the new version.
 
+**Doris analytics backend** (`"analytics": "doris"` on create): adds a
+dedicated Apache Doris analytics database as a sidecar container. Only for
+tasks that are specifically about the Doris/dedicated-analytics-DB feature —
+for normal analytics testing, plain Postgres instances behave identically
+to users.
+
+- Requires `version` with DHIS2 major ≥ 42 (`400` otherwise); cannot be
+  combined with `war_url`/`war_file`.
+- A Doris sidecar needs ~5.5 GB RAM, so your token is capped at
+  `D2_BROKER_MAX_AGENT_DORIS` (default **1**) Doris-enabled instances
+  (`409` when hit), and creates are slower (Doris image + boot).
+- Instance elements have `"analytics": "doris" | null` so you can see which
+  instances have it.
+- **What actually runs in Doris on v42**: aggregate data-value and
+  completeness analytics only. Event, enrollment, and tracked-entity
+  analytics tables stay in Postgres until v43 — do not file "missing
+  event tables in Doris" as a bug on 42.
+- Verify via the API as usual (`POST /api/resourceTables/analytics`, then
+  query `/api/analytics`). To inspect Doris directly, it speaks the MySQL
+  protocol on dev-net at `dhis2-<name>-doris:9030` (user `root`, empty
+  password, database `analytics`): e.g.
+  `mysql -h dhis2-<name>-doris -P9030 -uroot -e "SELECT count(*) FROM analytics.analytics"`.
+- If the Doris container is recreated while Tomcat keeps running, the next
+  analytics run fails with "Communications link failure" (stale JDBC pool)
+  — stop/start the instance to fix.
+
 **Memory / heap**: instances default to `-Xmx4g`. Set a different heap at
 create with `"memory":"2g"` in the body, or change it later with
 `POST /instances/<name>/memory` `{"memory":"2g"}` (recreates Tomcat — a brief

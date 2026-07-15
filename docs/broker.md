@@ -36,6 +36,7 @@ launchd plist):
 | `D2_BROKER_JOB_TIMEOUT` | `7200` | Per-job timeout, seconds |
 | `D2_DEFAULT_MEMORY` | `4g` | Default Tomcat max heap for new instances (`d2-instance-create`) |
 | `D2_BROKER_MAX_AGENT_MEMORY` | `8g` | Max heap an agent token may request |
+| `D2_BROKER_MAX_AGENT_DORIS` | `1` | Cap on agent-owned Doris-enabled instances (~5.5 GB RAM each) |
 
 State lives in `$DHIS2_BASE/_broker/`: `tokens.json` (mode 0600),
 `broker.log`, `jobs/<id>.json` + `jobs/<id>.log`, `downloads/` (temporary
@@ -107,7 +108,7 @@ stable resolved from releases.dhis2.org) or an exact release (`2.42.4`).
 |---|---|
 | `GET /health` | Liveness (no auth) |
 | `GET /instances[?full=1]` | List instances (agent scope: `agent-*` only). `full=1` adds `dhis2_major_version` (slower) |
-| `POST /instances` | Create. Body: `{"name", "version"?, "seed"?, "tomcat"?, "memory"?, "http_port"?, "pg_port"?, "war_url"?†, "war_file"?†}` → 202 job |
+| `POST /instances` | Create. Body: `{"name", "version"?, "seed"?, "tomcat"?, "memory"?, "http_port"?, "pg_port"?, "analytics"?, "war_url"?†, "war_file"?†}` → 202 job |
 | `POST /instances/<name>/reset` | Restore DB from a seed. Body: `{"seed"}` → 202 job |
 | `POST /instances/<name>/start` | `docker compose up -d` → 202 job |
 | `POST /instances/<name>/stop` | `docker compose down` → 202 job |
@@ -128,6 +129,17 @@ stable resolved from releases.dhis2.org) or an exact release (`2.42.4`).
 `http_port`/`pg_port` are optional (integers 1024–65535); omitted, the broker
 auto-selects a port not used or reserved by any other instance (running or
 stopped), so new instances no longer collide with stopped ones.
+
+`analytics` (optional) requests a dedicated analytics database:
+`"analytics": "doris"` adds a per-instance Apache Doris container
+(`d2-instance-create -a doris`). Requires a `version` with DHIS2 major ≥ 42
+(else `400`); cannot be combined with `war_url`/`war_file`. Instance
+elements carry an `analytics` field (`"doris"` or `null`). A Doris sidecar
+needs ~5.5 GB RAM, so agent tokens are capped at `D2_BROKER_MAX_AGENT_DORIS`
+(default 1) Doris-enabled instances. On DHIS2 42, aggregate and completeness
+analytics run in Doris; event/enrollment/tracked-entity analytics stay in
+Postgres until 43. Background and sizing:
+[doris/spike-findings-2026-07-14.md](./doris/spike-findings-2026-07-14.md).
 
 A known `local_admin` / `district` superuser (`ALL` authority) is ensured on
 every restore and create, independent of the restored database's own `admin`,

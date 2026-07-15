@@ -142,6 +142,7 @@ list view, fetch per-instance on demand).
       "devnet_url": "http://dhis2-school-ind-test:8080",
       "devnet_db":  "dhis2-school-ind-test-db:5432",
       "agent_managed": false,
+      "analytics": null,                 // "doris" if created with an analytics backend
       "dhis2_major_version": "42"        // only when full=1
     }
   ]
@@ -160,6 +161,7 @@ Field semantics:
 | `devnet_url` | string \| null | Tomcat URL inside the shared `dev-net` Docker network. `null` if not attached. |
 | `devnet_db` | string \| null | Postgres `host:port` inside `dev-net` (creds always `dhis`/`dhis`/`dhis2`). |
 | `agent_managed` | bool | `name` starts with `agent-`. UI can render an "agent" badge. |
+| `analytics` | string \| null | `"doris"` if the instance was created with a dedicated analytics database, else `null`. Read from the instance `.env`, so it is accurate for stopped instances too. |
 | `dhis2_major_version` | string \| null | e.g. `"42"`. Present only when `full=1`. |
 
 ### `POST /instances`
@@ -178,7 +180,8 @@ Body:
   "http_port": 9010,             // optional; host HTTP port. Auto-selected (free) if omitted
   "pg_port": 5433,               // optional; host Postgres port. Auto-selected (free) if omitted
   "war_url":  "https://...",     // optional; admin only
-  "war_file": "/abs/path.war"    // optional; admin only
+  "war_file": "/abs/path.war",   // optional; admin only
+  "analytics": "doris"           // optional; dedicated analytics DB, requires version >= 42
 }
 ```
 
@@ -198,10 +201,15 @@ Validation:
   the broker auto-selects a port not used or reserved by any other instance
   (running or stopped). An explicit port already in use/reserved fails the job.
 - `war_url` must be `http://` or `https://`.
+- `analytics` must be `"doris"` and requires a `version` with DHIS2 major
+  ≥ 42 (→ `400` otherwise); combining it with `war_url`/`war_file` → `400`.
+  The instance gets a per-instance Apache Doris container (~5.5 GB RAM).
 - Agent scope:
   - `war_url` / `war_file` → `403`.
   - `seed` may only be a relative path inside `$DHIS2_BASE/_seeds/`.
   - At most `D2_BROKER_MAX_AGENT_INSTANCES` (default 5) `agent-*`
+    instances; cap exceeded → `409`.
+  - At most `D2_BROKER_MAX_AGENT_DORIS` (default 1) Doris-enabled
     instances; cap exceeded → `409`.
 - An existing instance directory (`$DHIS2_BASE/<name>/`) or running
   container with the same name → `409`.

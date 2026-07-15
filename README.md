@@ -23,8 +23,10 @@ Scripts to help you:
 - Check instance status
 - Inspect logs and connect to PostgreSQL
 - Detect DHIS2 version from a database backup
+- Optionally attach a dedicated **Apache Doris analytics database** to an
+  instance (DHIS2 ≥ 42): `d2-instance-create -a doris`
 - Expose all of the above over a local HTTP API (`d2-broker`) for other
-  clients — AI agent sandboxes, menu bar widgets, dashboards. See [broker.md](broker.md).
+  clients — AI agent sandboxes, menu bar widgets, dashboards. See [docs/broker.md](docs/broker.md).
 
 All scripts are in `bash-scripts-docker/` and expect:
 
@@ -49,22 +51,12 @@ All scripts are in `bash-scripts-docker/` and expect:
    export DHIS2_BASE=$HOME/dhis2-docker
 ```
 
-3. Ensure templates exist:
-
-```text
-   $DHIS2_BASE/_templates/
-     dhis.conf
-     log4j2.xml
-     server.xml
-     docker-compose-tomcat9.yml
-     docker-compose-tomcat10.yml
-```
-
-4. (Optional) Put scripts on your PATH, e.g.:
+3. Run the setup script — copies templates to `$DHIS2_BASE/_templates/` and
+   symlinks the scripts into `/usr/local/bin`:
 
 ```bash
-   ln -s "$PWD/bash-scripts-docker/d2-instance-create" /usr/local/bin/d2-instance-create
-   # repeat for others as needed
+   ./setup.sh install   # first time
+   ./setup.sh update    # after pulling changes (never overwrites customised templates)
 ```
 
 ---
@@ -91,7 +83,7 @@ All scripts are in `bash-scripts-docker/` and expect:
 
 - **HTTP API**
   - `d2-broker` — token-authenticated local HTTP API over the scripts above,
-    with a restricted scope for AI agent sandboxes ([broker.md](broker.md))
+    with a restricted scope for AI agent sandboxes ([docs/broker.md](docs/broker.md))
 
 ---
 
@@ -107,6 +99,10 @@ d2-instance-create -v 2.42.4 -p 9010 -g 5433 myinstance
 d2-instance-create -v 2.42 -m 6g myinstance   # 6 GB max heap (default is 4g)
 
 d2-instance-create -v 2.41 myinstance   # Tomcat auto-selected (2.41 -> Tomcat 9)
+
+d2-instance-create -v 42 -a doris myinstance   # with a dedicated Apache Doris
+# analytics database (DHIS2 >= 42 only; adds a ~5.5 GB Doris container —
+# see docs/doris/spike-findings-2026-07-14.md for what runs in Doris per version)
 ```
 
 If you omit `-p` / `-g`, ports are auto‑selected.
