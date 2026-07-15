@@ -451,7 +451,12 @@ class JobManager:
     def submit(self, op, instance, steps, post_cmds=None, cleanup=None):
         """steps: list of argv to run sequentially (any failure fails the
         job). post_cmds: best-effort follow-ups. cleanup: paths removed when
-        the job finishes, success or not (e.g. downloaded seed files)."""
+        the job finishes, success or not (e.g. downloaded seed files).
+
+        Raises ApiError(409) if the instance already has a queued/running
+        job — checked under the same lock hold as the enqueue, so two
+        concurrent requests for one instance can't both pass (the handler's
+        check_no_active_job is only an early fast-fail)."""
         job = {
             "id": "j-" + secrets.token_hex(4),
             "op": op,
@@ -465,6 +470,13 @@ class JobManager:
             "result": None,
         }
         with self.lock:
+            active = [j for j in self.jobs.values()
+                      if j["instance"] == instance
+                      and j["status"] in ("queued", "running")]
+            if active:
+                raise ApiError(409, f"instance '{instance}' already has an "
+                                    f"active job: {active[0]['id']} "
+                                    f"({active[0]['op']})")
             self.jobs[job["id"]] = job
         self._persist(job)
         self.queue.put((job, steps, post_cmds or [], cleanup or []))

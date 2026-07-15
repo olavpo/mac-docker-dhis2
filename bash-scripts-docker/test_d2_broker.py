@@ -186,5 +186,55 @@ class RequiredTomcatMajor(unittest.TestCase):
         self.assertIsNone(broker.required_tomcat_major(None))
 
 
+class SubmitExclusive(unittest.TestCase):
+    """submit() itself must reject an instance with an active job (under one
+    lock hold) — the handler's early check_no_active_job is not atomic with
+    the enqueue."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_base = os.environ.get("DHIS2_BASE")
+        os.environ["DHIS2_BASE"] = self._tmp.name
+        # Keep the worker thread inert so submitted jobs stay queued and
+        # nothing writes to the temp dir behind the test's back.
+        self._real_worker = broker.JobManager._worker
+        broker.JobManager._worker = lambda self: None
+        self.mgr = broker.JobManager()
+
+    def tearDown(self):
+        broker.JobManager._worker = self._real_worker
+        if self._old_base is None:
+            os.environ.pop("DHIS2_BASE", None)
+        else:
+            os.environ["DHIS2_BASE"] = self._old_base
+        self._tmp.cleanup()
+
+    def _fake_active(self, instance, status):
+        job = {"id": "j-fake", "op": "create", "instance": instance,
+               "status": status, "created_at": broker.now_iso()}
+        self.mgr.jobs[job["id"]] = job
+
+    def test_active_job_rejected(self):
+        self._fake_active("foo", "running")
+        with self.assertRaises(broker.ApiError) as ctx:
+            self.mgr.submit("stop", "foo", [])
+        self.assertEqual(ctx.exception.status, 409)
+
+    def test_queued_job_rejected(self):
+        self._fake_active("foo", "queued")
+        with self.assertRaises(broker.ApiError):
+            self.mgr.submit("stop", "foo", [])
+
+    def test_other_instance_ok(self):
+        self._fake_active("foo", "running")
+        job = self.mgr.submit("stop", "bar", [])
+        self.assertEqual(job["instance"], "bar")
+
+    def test_terminal_job_ok(self):
+        self._fake_active("foo", "failed")
+        job = self.mgr.submit("stop", "foo", [])
+        self.assertEqual(job["instance"], "foo")
+
+
 if __name__ == "__main__":
     unittest.main()
