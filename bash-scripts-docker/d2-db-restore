@@ -49,7 +49,7 @@ timeout_exec() {
 }
 
 # Check for required environment variable
-if [ -z "$DHIS2_BASE" ]; then
+if [ -z "${DHIS2_BASE:-}" ]; then
   echo "Error: DHIS2_BASE environment variable not set"
   exit 1
 fi

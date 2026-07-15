@@ -136,6 +136,13 @@ fi
 JAVA_MEM_OPTS=" -Xmx${MEMORY}"
 
 INSTANCE=$1
+# Same rule the broker enforces (NAME_RE in d2-broker): sane compose project
+# names, no path tricks (spaces, slashes) that would break the sed templating
+# below, and no collision with the reserved _-prefixed dirs (_seeds, _broker).
+if ! [[ "$INSTANCE" =~ ^[a-z][a-z0-9_-]{1,29}$ ]]; then
+  echo "Error: instance name must match ^[a-z][a-z0-9_-]{1,29}\$ (got '$INSTANCE')" >&2
+  exit 1
+fi
 DHIS2_HOME="$DHIS2_BASE/$INSTANCE"
 
 
