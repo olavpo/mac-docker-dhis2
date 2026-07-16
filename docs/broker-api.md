@@ -127,8 +127,9 @@ Unauthenticated liveness probe. Returns `200`:
 
 List instances. Agent scope returns only `agent-*` instances. The optional
 `full=1` adds `dhis2_major_version` (queries `flyway_schema_history` on
-each running DB — slow if you have many instances; omit for the dashboard
-list view, fetch per-instance on demand).
+each running DB) and `readiness` (probes `/api/system/info` on each running
+instance) — slow if you have many instances; omit for the dashboard
+list view, fetch per-instance on demand.
 
 ```json
 {
@@ -143,7 +144,10 @@ list view, fetch per-instance on demand).
       "devnet_db":  "dhis2-school-ind-test-db:5432",
       "agent_managed": false,
       "analytics": null,                 // "doris" if created with an analytics backend
-      "dhis2_major_version": "42"        // only when full=1
+      "created_at": "2026-07-16T08:12:44+00:00",
+      "label": "PI-mapper review",       // free text from create; null if none
+      "dhis2_major_version": "42",       // only when full=1
+      "readiness": "ready"               // only when full=1
     }
   ]
 }
@@ -162,7 +166,10 @@ Field semantics:
 | `devnet_db` | string \| null | Postgres `host:port` inside `dev-net` (creds always `dhis`/`dhis`/`dhis2`). |
 | `agent_managed` | bool | `name` starts with `agent-`. UI can render an "agent" badge. |
 | `analytics` | string \| null | `"doris"` if the instance was created with a dedicated analytics database, else `null`. Read from the instance `.env`, so it is accurate for stopped instances too. |
+| `created_at` | string \| null | UTC ISO timestamp of the create request. `null` for instances predating this field (no meta file). |
+| `label` | string \| null | Free-text label passed on create — lets concurrent sessions recognise their own instances. |
 | `dhis2_major_version` | string \| null | e.g. `"42"`. Present only when `full=1`. |
+| `readiness` | enum \| null | Present only when `full=1`. `deploying` (no HTTP answer on `/api` yet) / `migrating` (HTTP answers, no version yet — Flyway/context startup) / `ready` (`/api/system/info` 200 with a version, or 401/403) / `null` (not running or no published port). Best-effort probe with a 3 s timeout. |
 
 ### `POST /instances`
 
@@ -181,7 +188,8 @@ Body:
   "pg_port": 5433,               // optional; host Postgres port. Auto-selected (free) if omitted
   "war_url":  "https://...",     // optional; admin only
   "war_file": "/abs/path.war",   // optional; admin only
-  "analytics": "doris"           // optional; dedicated analytics DB, requires version >= 42
+  "analytics": "doris",          // optional; dedicated analytics DB, requires version >= 42
+  "label": "PI-mapper review"    // optional; free text (<= 100 chars), echoed in GET /instances
 }
 ```
 
@@ -204,6 +212,8 @@ Validation:
 - `analytics` must be `"doris"` and requires a `version` with DHIS2 major
   ≥ 42 (→ `400` otherwise); combining it with `war_url`/`war_file` → `400`.
   The instance gets a per-instance Apache Doris container (~5.5 GB RAM).
+- `label` is free text, at most 100 printable characters (→ `400` otherwise).
+  Stored broker-side (`_broker/meta/`) with the creation timestamp.
 - Agent scope:
   - `war_url` / `war_file` → `403`.
   - `seed` may only be a relative path inside `$DHIS2_BASE/_seeds/`.
@@ -344,13 +354,15 @@ Body:
       "path": "sl-demo-v42.sql.gz",
       "source": "seeds",
       "size_bytes": 184729281,
-      "modified": "2026-04-01T13:22:08+00:00"
+      "modified": "2026-04-01T13:22:08+00:00",
+      "dhis2_version": 42                                  // from the _vNN filename token; null if absent
     },
     {
       "path": "backups/acdc/acdc_2026-03-03.sql.gz",      // admin only
       "source": "backups",
       "size_bytes": 928374829,
-      "modified": "2026-03-03T11:00:00+00:00"
+      "modified": "2026-03-03T11:00:00+00:00",
+      "dhis2_version": null
     }
   ]
 }

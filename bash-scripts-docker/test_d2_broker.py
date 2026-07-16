@@ -92,6 +92,123 @@ class DumpElement(unittest.TestCase):
             self.assertEqual(elem["path"], "demo.sql.gz")
             self.assertEqual(elem["source"], "seeds")
 
+    def test_dhis2_version_from_filename_token(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            f = root / "dhis2-db-sierra-leone_v42.sql.gz"
+            f.write_bytes(b"x")
+            self.assertEqual(
+                broker.dump_element(f, "seeds", root)["dhis2_version"], 42)
+
+    def test_dhis2_version_none_without_token(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            f = root / "demo.sql.gz"
+            f.write_bytes(b"x")
+            self.assertIsNone(
+                broker.dump_element(f, "seeds", root)["dhis2_version"])
+
+
+class InstanceMeta(unittest.TestCase):
+    def _with_base(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        old = os.environ.get("DHIS2_BASE")
+        os.environ["DHIS2_BASE"] = d.name
+        self.addCleanup(
+            lambda: os.environ.update({"DHIS2_BASE": old}) if old
+            else os.environ.pop("DHIS2_BASE", None))
+        return d.name
+
+    def test_roundtrip_with_label(self):
+        self._with_base()
+        broker.write_instance_meta("agent-x", "review of tool-y")
+        meta = broker.read_instance_meta("agent-x")
+        self.assertEqual(meta["label"], "review of tool-y")
+        self.assertTrue(meta["created_at"].endswith("+00:00"))
+
+    def test_no_label_omitted(self):
+        self._with_base()
+        broker.write_instance_meta("agent-x")
+        meta = broker.read_instance_meta("agent-x")
+        self.assertNotIn("label", meta)
+        self.assertIn("created_at", meta)
+
+    def test_missing_file_returns_empty(self):
+        self._with_base()
+        self.assertEqual(broker.read_instance_meta("nope"), {})
+
+    def test_recreate_overwrites(self):
+        self._with_base()
+        broker.write_instance_meta("agent-x", "old")
+        broker.write_instance_meta("agent-x", "new")
+        self.assertEqual(broker.read_instance_meta("agent-x")["label"], "new")
+
+
+class InstanceReadiness(unittest.TestCase):
+    """Probes a throwaway local HTTP server standing in for the instance."""
+
+    def _serve(self, status, body=b"{}"):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        return srv.server_address[1]
+
+    def _inst(self, port, status="running"):
+        return {"status": status, "http_port": port}
+
+    def test_not_running_is_none(self):
+        self.assertIsNone(broker.instance_readiness(self._inst(1, "stopped")))
+
+    def test_no_port_is_none(self):
+        self.assertIsNone(broker.instance_readiness(self._inst(None)))
+
+    def test_200_with_version_is_ready(self):
+        port = self._serve(200, b'{"version": "2.42.5"}')
+        self.assertEqual(broker.instance_readiness(self._inst(port)), "ready")
+
+    def test_200_without_version_is_migrating(self):
+        port = self._serve(200, b'{"contextPath": "x"}')
+        self.assertEqual(
+            broker.instance_readiness(self._inst(port)), "migrating")
+
+    def test_401_is_ready(self):
+        port = self._serve(401)
+        self.assertEqual(broker.instance_readiness(self._inst(port)), "ready")
+
+    def test_404_is_deploying(self):
+        port = self._serve(404)
+        self.assertEqual(
+            broker.instance_readiness(self._inst(port)), "deploying")
+
+    def test_503_is_migrating(self):
+        port = self._serve(503)
+        self.assertEqual(
+            broker.instance_readiness(self._inst(port)), "migrating")
+
+    def test_connection_refused_is_deploying(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()  # nothing listens here now
+        self.assertEqual(
+            broker.instance_readiness(self._inst(port)), "deploying")
+
 
 class MemToMb(unittest.TestCase):
     def test_megabytes(self):

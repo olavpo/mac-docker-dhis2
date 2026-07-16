@@ -44,6 +44,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -91,6 +92,34 @@ def broker_port():
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# --- Instance metadata -------------------------------------------------------
+# Broker-side bookkeeping (creation time, optional free-text label) written at
+# create-accept time under _broker/meta/<name>.json. Kept out of the instance
+# directory because that is created later, by the job. Stale files for deleted
+# instances are harmless: list_instances only reads meta for instances that
+# exist, and a re-created instance overwrites its file.
+
+def meta_dir():
+    d = broker_dir() / "meta"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def write_instance_meta(name, label=None):
+    meta = {"created_at": now_iso()}
+    if label:
+        meta["label"] = label
+    (meta_dir() / f"{name}.json").write_text(json.dumps(meta))
+
+
+def read_instance_meta(name):
+    try:
+        with open(meta_dir() / f"{name}.json") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
 
 
 # --- Tokens ----------------------------------------------------------------
@@ -191,6 +220,7 @@ def list_instances():
         pg_port = container_port(db, "5432/tcp") if db else None
         on_devnet = bool(tomcat) and "dev-net" in container_networks(tomcat)
         db_on_devnet = bool(db) and "dev-net" in container_networks(db)
+        meta = read_instance_meta(inst)
         instances.append({
             "name": inst,
             "status": status,
@@ -201,8 +231,42 @@ def list_instances():
             "devnet_db": f"dhis2-{inst}-db:5432" if db_on_devnet else None,
             "agent_managed": inst.startswith(AGENT_PREFIX),
             "analytics": instance_analytics(inst),
+            "created_at": meta.get("created_at"),
+            "label": meta.get("label"),
         })
     return instances
+
+
+def instance_readiness(inst):
+    """Best-effort DHIS2 readiness, probed on the host-published port —
+    orthogonal to the container-level 'status':
+
+    - 'deploying' — no HTTP answer on /api yet (Tomcat starting, WAR unpacking)
+    - 'migrating' — HTTP answers but /api/system/info has no version yet
+      (Flyway migrations / Spring context still coming up)
+    - 'ready'     — /api/system/info returns 200 with a resolved version
+      (401/403 also count: the API is up and enforcing auth)
+    - None        — instance not running or no published port
+    """
+    if inst["status"] != "running" or not inst["http_port"]:
+        return None
+    url = f"http://localhost:{inst['http_port']}/api/system/info"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            try:
+                data = json.loads(r.read(65536).decode())
+            except ValueError:
+                return "migrating"
+            return "ready" if data.get("version") else "migrating"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return "ready"
+        if e.code == 404:
+            return "deploying"
+        return "migrating"
+    except (urllib.error.URLError, OSError):
+        return "deploying"
 
 
 def instance_version(name):
@@ -379,6 +443,8 @@ def dump_element(path, source, root):
         "size_bytes": st.st_size,
         "modified": datetime.fromtimestamp(
             st.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+        # Heuristic from the filename's _vNN token; None when absent.
+        "dhis2_version": seed_major(path.name),
     }
 
 
@@ -747,6 +813,7 @@ class Handler(BaseHTTPRequestHandler):
             if query.get("full", ["0"])[0] == "1":
                 for i in instances:
                     i["dhis2_major_version"] = instance_version(i["name"])
+                    i["readiness"] = instance_readiness(i)
             return self.send_json(200, {"instances": instances})
         if parts == ["seeds"]:
             return self.send_json(200, {"seeds_dir": str(seeds_dir()),
@@ -812,6 +879,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(409,
                                f"agent instance cap reached ({cap}); delete "
                                f"one of: {', '.join(i['name'] for i in existing)}")
+
+        label = body.get("label")
+        if label is not None:
+            label = str(label).strip()
+            if len(label) > 100 or any(ord(c) < 32 for c in label):
+                raise ApiError(400, "label must be <= 100 printable characters")
 
         argv = [str(SCRIPT_DIR / "d2-instance-create")]
         version = body.get("version")
@@ -882,6 +955,7 @@ class Handler(BaseHTTPRequestHandler):
             ["docker", "network", "connect", "--alias", f"dhis2-{name}-db",
              "dev-net", f"{name}-db-1"],
         ]
+        write_instance_meta(name, label)
         job = self.jobs.submit("create", name, pre_steps + [argv],
                                post_cmds=post_cmds, cleanup=cleanup)
         return self.job_response(job)

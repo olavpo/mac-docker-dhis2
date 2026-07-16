@@ -19,17 +19,33 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
 - You manage instances named **`agent-*` only**. Always pick names like
   `agent-<purpose>` (e.g. `agent-indicator-test`). Other instances on the
   host are visible to the user only — never assume you can touch them.
+- **An `agent-*` instance you didn't create this session may belong to a
+  concurrently running session** — it is not automatically stale. Prefer
+  creating your own instance over reusing or deleting someone else's; pass a
+  `label` on create (e.g. `{"label": "review of tool-x"}`) so other sessions
+  can recognise yours, and check `created_at`/`label` in `GET /instances`
+  before treating a leftover as abandoned.
 - Seeds: **only the curated list from `GET /seeds`** (demo/test databases the
   user has approved for agent use), or **no seed at all** for a clean, empty
   DHIS2 that initializes itself on first start. You cannot restore real
   backups, host files, or URLs — don't ask the broker to; it will refuse.
+  Each seed element carries a `dhis2_version` hint (from its filename) — use
+  it to plan version matrices. Note the **Laos HMIS demo seed exists only as
+  v41**: it boots fine on a 2.42/2.43 instance, but Flyway migrates it on
+  first boot, which takes **10–25 minutes** with nothing answering on `/api`.
 - There is a cap on concurrent `agent-*` instances — it counts **stopped
   instances too**, including stale leftovers from earlier sessions. When the
   cap is hit, the error names deletion candidates; delete only `agent-*`
-  ones. In practice, keep the live footprint to **1 running instance where
-  possible, 2 max**: two DHIS2 instances *booting* concurrently starve each
-  other (20+ minutes with nothing on `/api`). If you need a second, wait
-  until the first answers `/api/system/info` before creating it.
+  ones (and see the ownership caveat above — prefer the oldest `created_at`,
+  stopped, unlabelled candidates). In practice, keep the live footprint to
+  **1 running instance where possible, 2 max**: two DHIS2 instances *booting*
+  concurrently starve each other (20+ minutes with nothing on `/api`). If you
+  need a second, wait until the first is ready before creating it.
+- **Instances can be found `stopped` mid-session** (host-side resource
+  management or the user intervening). A long-running dev server pointed at
+  one then fails with confusing DNS/proxy errors, not a clear "upstream
+  gone". If something that worked stops resolving, check `GET /instances`
+  first — `start` is cheap and preserves state.
 - **Backups are admin-only**: `POST /instances/<name>/backup` returns `403`
   for your token (`_backups/` is the user's territory). To get clean or known
   state, reset from a seed or delete and re-create — don't try to back up.
@@ -60,9 +76,12 @@ CT="Content-Type: application/json"
 curl -s -H "$H" $B/instances
 curl -s -H "$H" $B/seeds
 
-# Create
-curl -s -X POST -H "$H" -H "$CT" -d '{"name":"agent-mytest","version":"42"}' $B/instances
-curl -s -X POST -H "$H" -H "$CT" -d '{"name":"agent-mytest","version":"2.42.4","seed":"<path from /seeds>"}' $B/instances
+# Create (always pass a label so other sessions can recognise your instances)
+curl -s -X POST -H "$H" -H "$CT" -d '{"name":"agent-mytest","version":"42","label":"<what this is for>"}' $B/instances
+curl -s -X POST -H "$H" -H "$CT" -d '{"name":"agent-mytest","version":"2.42.4","seed":"<path from /seeds>","label":"<what this is for>"}' $B/instances
+
+# Readiness (full=1 adds "readiness": deploying | migrating | ready | null)
+curl -s -H "$H" "$B/instances?full=1"
 
 # Poll the job (id from the 202 response)
 curl -s -H "$H" $B/jobs/<job-id>          # status + log_tail + result
@@ -111,7 +130,7 @@ WAR, not Tomcat. The broker **refuses this crossing with a `400`** (deploying a
 2.42 WAR onto the old Tomcat 9 would 404 everywhere). To move a database across
 that boundary, **create a fresh instance at the target version with the older
 seed** and let Flyway migrate it on boot (a v41 seed on a 2.42/2.43 instance
-migrates fine, though the first boot's migration takes ~10 min). The pre-upgrade backup (`backup_first`) is skipped
+migrates fine, though the first boot's migration takes 10–25 min). The pre-upgrade backup (`backup_first`) is skipped
 automatically for your token — it would land in admin-only `_backups/`, which
 you can't read back — so there's no safety net: if an upgrade breaks the
 instance, delete and re-create. The job `result` carries a best-effort
@@ -239,10 +258,13 @@ print(con.run("SELECT count(*) FROM datavalue"))
   curl -s -X POST -H "$H" $B/instances/agent-<name>/stop
   curl -s -X POST -H "$H" $B/instances/agent-<name>/start
   ```
-- **Startup time**: after a create with a version, DHIS2 still needs 1–5
-  minutes to boot (Flyway migrations on empty DBs take a while). Poll
-  `/api/system/info` until it answers; 502/connection-refused means Tomcat
-  is still starting.
+- **Startup time**: a create/reset job succeeds when the containers are up —
+  DHIS2 then still needs 1–5 minutes to boot (10–25 on a cross-version seed
+  migration). Poll `GET /instances?full=1` and wait for
+  `"readiness": "ready"` — the broker probes `/api/system/info` for you and
+  distinguishes `deploying` (nothing on `/api` yet) from `migrating`
+  (Flyway/context startup). Polling `/api/system/info` yourself works too;
+  502/connection-refused just means Tomcat is still starting.
 - **Warm the app before API-only smoke tests**: on a freshly booted (or
   restarted) instance, some legacy endpoints can persistently 500 —
   e.g. `GET /api/authorities` returning
@@ -255,6 +277,14 @@ print(con.run("SELECT count(*) FROM datavalue"))
 - An empty instance (created with a `version` but no seed) has no
   organisation units or metadata, and only the `admin` and `local_admin`
   users — import what you need, or use a seed.
+- **Exercising job/scheduler features**: no seed ships a running job or a
+  scheduler queue. Build one in seconds: create 2–3 job configurations
+  (`POST /api/jobConfigurations` with e.g.
+  `{"name": "t1", "jobType": "ANALYTICS_TABLE", "cronExpression": "0 0 3 * * ?"}`),
+  then group them into a queue with
+  `POST /api/scheduler/queues/<name>` (`{"cronExpression": …, "sequence": ["<uid1>", "<uid2>"]}`).
+  Trigger a long-running job (e.g. analytics export on a seeded DB) to get
+  live task progress to test against.
 - For browser/Playwright login use **Basic-auth `GET /api/me`** to get a
   session cookie; the React login page resists programmatic form fills.
   Do **not** use `POST /api/auth/login` — it doesn't exist on 2.40 and
