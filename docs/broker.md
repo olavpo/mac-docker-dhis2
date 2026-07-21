@@ -34,6 +34,7 @@ launchd plist):
 | `D2_BROKER_BIND` | `127.0.0.1` | Bind address — loopback-only by default; see below |
 | `D2_BROKER_MAX_AGENT_INSTANCES` | `5` | Cap on concurrent `agent-*` instances |
 | `D2_BROKER_JOB_TIMEOUT` | `7200` | Per-job timeout, seconds |
+| `D2_BROKER_BOOT_WAIT` | `1800` | Seconds a booting job holds for the instance API to become ready before finishing (serializes boot; capped) |
 | `D2_DEFAULT_MEMORY` | `4g` | Default Tomcat max heap for new instances (`d2-instance-create`) |
 | `D2_BROKER_MAX_AGENT_MEMORY` | `8g` | Max heap an agent token may request |
 | `D2_BROKER_MAX_AGENT_DORIS` | `1` | Cap on agent-owned Doris-enabled instances (~5.5 GB RAM each) |
@@ -93,6 +94,14 @@ a job**, because the underlying operations range from seconds (stop) to hours
 Poll `GET /jobs/<id>` until `status` is terminal. Jobs run on a **single
 worker, globally serialized** — deliberate, since `d2-instance-create`
 auto-selects free ports by scanning, so concurrent creates could collide.
+
+**Booting jobs hold until the API is ready.** A `create`/`reset`/`start`/
+`upgrade`/`memory` job stays `running` until the instance answers as `ready`
+(or `D2_BROKER_BOOT_WAIT` seconds elapse), *then* finishes. Because the worker
+is serialized, this keeps two instances from running heavy Flyway boots at once
+and starving each other. The cap means a stuck boot can't wedge the queue; on
+cap timeout the job still succeeds (a log line notes the instance may still be
+migrating).
 
 Job statuses: `queued → running → succeeded | failed`; `interrupted` marks
 jobs that were in flight when the broker was restarted.
@@ -185,9 +194,9 @@ containers on the `dev-net` Docker network), `devnet_db` (`dhis2-<name>-db:5432`
 PostgreSQL `dhis`/`dhis`/`dhis2` — the broker attaches the DB container of
 created instances to dev-net as a debugging side-door), and `localhost_url`
 (host browser; not reachable from inside containers). An `upgrade` result adds
-a best-effort `dhis2_major_version` (it may still read the pre-upgrade major
-until Flyway finishes migrating — re-poll `GET /instances?full=1`). A `backup`
-job's `result` is instead the new backup's `GET /seeds` entry.
+a `dhis2_major_version`, read after the boot-gate confirms readiness, so it
+reflects the migrated schema. A `backup` job's `result` is instead the new
+backup's `GET /seeds` entry.
 
 ## Sandbox integration (ai-agentic-sandbox)
 

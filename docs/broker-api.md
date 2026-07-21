@@ -95,6 +95,16 @@ instances at the same time both succeed (both get `202`), but they run
 sequentially. A second POST targeting an **instance that already has an
 active job** gets `409`.
 
+Jobs that boot the app (`create`, `reset`, `start`, `upgrade`, `memory`)
+stay `running` until the instance's API answers as `ready` — not merely
+until the containers are up. This is deliberate: because the worker is
+serialized, holding here keeps the next instance from starting its heavy
+Flyway boot while this one is still migrating (the two would starve each
+other). If the instance isn't ready within `D2_BROKER_BOOT_WAIT` seconds
+(default 1800) the job succeeds anyway, with a log line noting it may still
+be migrating. Expect these jobs to run for minutes on a fresh DB — show the
+`log_tail`; it streams migration progress.
+
 For `create`, `reset`, and `start`, the job's `result` on success is the
 same shape as one element of `GET /instances` — UIs can use this to
 refresh their cached instance without a follow-up call. `upgrade` likewise
@@ -169,7 +179,7 @@ Field semantics:
 | `created_at` | string \| null | UTC ISO timestamp of the create request. `null` for instances predating this field (no meta file). |
 | `label` | string \| null | Free-text label passed on create — lets concurrent sessions recognise their own instances. |
 | `dhis2_major_version` | string \| null | e.g. `"42"`. Present only when `full=1`. |
-| `readiness` | enum \| null | Present only when `full=1`. `deploying` (no HTTP answer on `/api` yet) / `migrating` (HTTP answers, no version yet — Flyway/context startup) / `ready` (`/api/system/info` 200 with a version, or 401/403) / `null` (not running or no published port). Best-effort probe with a 3 s timeout. |
+| `readiness` | enum \| null | Present only when `full=1`. `deploying` (no HTTP answer on `/api` yet) / `migrating` (HTTP answers, no version yet — Flyway/context startup) / `ready` (`/api/system/info` 200 with a version, or 401/403) / `null` (not running or no published port). Best-effort probe with a 3 s timeout, authenticated as the built-in `local_admin` superuser. **`ready` means metadata-usable, not that analytics/resource tables are built** — don't trigger analytics off this signal. If you need the earliest possible "usable" moment, probe the instance's API directly (an authenticated `/api/system/info` or a real metadata query answers before some of the boot settles). |
 
 ### `POST /instances`
 
@@ -323,10 +333,10 @@ Body (exactly one of `version` / `war_url` / `war_file` required):
 - `backup_first` (default `true`) prepends a `d2-db-backup` step; its path is
   written to the job log.
 
-On success, `result` is the `GET /instances` element with a best-effort
-`dhis2_major_version`. Because Flyway migrates asynchronously on Tomcat boot,
-this may still read the pre-upgrade major; re-poll `GET /instances?full=1`
-once the instance is back up to observe the migrated version.
+On success, `result` is the `GET /instances` element with `dhis2_major_version`.
+The job holds until the upgraded instance is `ready` (see the boot-gate note in
+§3) before reading it, so it reflects the migrated schema rather than the
+pre-upgrade major.
 
 ### `POST /instances/<name>/memory`
 

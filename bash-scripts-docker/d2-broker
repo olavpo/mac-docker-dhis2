@@ -34,7 +34,14 @@
 #                                    bridge IP or 0.0.0.0.
 #     D2_BROKER_MAX_AGENT_INSTANCES  Cap on agent-* instances (default 5).
 #     D2_BROKER_JOB_TIMEOUT          Per-job timeout in seconds (default 7200).
+#     D2_BROKER_BOOT_WAIT            Seconds a booting job (create/reset/start/
+#                                    upgrade/memory) holds for the instance API
+#                                    to become ready before finishing, so two
+#                                    instances never boot concurrently (default
+#                                    1800; capped so a stuck boot can't wedge
+#                                    the queue).
 
+import base64
 import json
 import os
 import re
@@ -61,6 +68,17 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,29}$")
 VERSION_RE = re.compile(r"^[0-9][0-9.]{0,15}$")
 MEMORY_RE = re.compile(r"^[0-9]+[mMgG]$")
 SEED_SUFFIXES = (".sql", ".sql.gz", ".pgc")
+
+# Basic-auth header for the guaranteed local_admin/district superuser. The
+# readiness probe sends it so /api/system/info returns the `version` field:
+# DHIS2 serves anonymous callers a stripped payload without it, which would
+# otherwise pin readiness at 'migrating' long after the API is usable.
+LOCAL_ADMIN_AUTH = "Basic " + base64.b64encode(b"local_admin:district").decode()
+
+# Boot-gate: seconds the job worker holds after a booting op until the
+# instance's API is ready, so two instances never run heavy Flyway boots at
+# once. Capped so a never-ready instance can't wedge the queue.
+BOOT_WAIT_POLL = 10
 
 
 def dhis2_base():
@@ -247,11 +265,22 @@ def instance_readiness(inst):
     - 'ready'     — /api/system/info returns 200 with a resolved version
       (401/403 also count: the API is up and enforcing auth)
     - None        — instance not running or no published port
+
+    The probe authenticates as the guaranteed local_admin/district superuser.
+    Anonymous callers get a stripped system/info with no `version`, so an
+    unauthenticated probe would report 'migrating' long after the API is fully
+    usable (and effectively never flip to 'ready'). A 401/403 still counts as
+    'ready': it means the security layer is up and rejecting — the app has
+    booted — even on an instance where local_admin was removed. Note 'ready'
+    means metadata-usable, NOT that analytics / resource tables are built.
     """
     if inst["status"] != "running" or not inst["http_port"]:
         return None
     url = f"http://localhost:{inst['http_port']}/api/system/info"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "Authorization": LOCAL_ADMIN_AUTH,
+    })
     try:
         with urllib.request.urlopen(req, timeout=3) as r:
             try:
@@ -267,6 +296,33 @@ def instance_readiness(inst):
         return "migrating"
     except (urllib.error.URLError, OSError):
         return "deploying"
+
+
+def wait_for_boot(name, log_file):
+    """Hold until instance `name` reports readiness 'ready' (its DHIS2 API is
+    up and serving) or the cap elapses. The job worker is single-threaded, so
+    blocking here serializes app boot across jobs: a second create/reset can't
+    begin its own heavy Flyway migration until this instance is up, avoiding
+    the mutual starvation of two instances booting at once. Best-effort — a cap
+    timeout logs a warning and returns without failing the job (the create
+    itself already succeeded)."""
+    cap = int(os.environ.get("D2_BROKER_BOOT_WAIT", 1800))
+    deadline = time.monotonic() + cap
+    with open(log_file, "a") as log:
+        log.write(f"\n[boot-wait] holding worker until {name} is ready "
+                  f"(cap {cap}s)...\n")
+        log.flush()
+        while time.monotonic() < deadline:
+            elem = next((i for i in list_instances()
+                         if i["name"] == name), None)
+            if elem and instance_readiness(elem) == "ready":
+                log.write(f"[boot-wait] {name} is ready\n")
+                log.flush()
+                return
+            time.sleep(BOOT_WAIT_POLL)
+        log.write(f"[boot-wait] {name} not ready after {cap}s; releasing "
+                  f"worker (instance may still be migrating)\n")
+        log.flush()
 
 
 def instance_version(name):
@@ -655,6 +711,13 @@ class JobManager:
                 if job["exit_code"] == 0:
                     if job["op"] in ("create", "reset", "start", "upgrade",
                                      "memory"):
+                        # Boot-gate: hold the single, serialized worker until
+                        # the API is up, so the next booting job doesn't run
+                        # its Flyway migration concurrently and starve this
+                        # one. Waiting first also means the result below (and
+                        # upgrade's dhis2_major_version) reflects the migrated
+                        # schema, not the pre-boot state.
+                        wait_for_boot(job["instance"], log_file)
                         elem = next(
                             (i for i in list_instances()
                              if i["name"] == job["instance"]), None)

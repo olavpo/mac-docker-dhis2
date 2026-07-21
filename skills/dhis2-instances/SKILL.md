@@ -39,8 +39,10 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
   ones (and see the ownership caveat above — prefer the oldest `created_at`,
   stopped, unlabelled candidates). In practice, keep the live footprint to
   **1 running instance where possible, 2 max**: two DHIS2 instances *booting*
-  concurrently starve each other (20+ minutes with nothing on `/api`). If you
-  need a second, wait until the first is ready before creating it.
+  concurrently starve each other (20+ minutes with nothing on `/api`). The
+  broker now guards against this — a create/reset job stays `running` until its
+  instance's API is up, so a second create you submit waits its turn rather
+  than booting alongside the first — but keep the footprint low anyway for RAM.
 - **Instances can be found `stopped` mid-session** (host-side resource
   management or the user intervening). A long-running dev server pointed at
   one then fails with confusing DNS/proxy errors, not a clear "upstream
@@ -133,10 +135,9 @@ seed** and let Flyway migrate it on boot (a v41 seed on a 2.42/2.43 instance
 migrates fine, though the first boot's migration takes 10–25 min). The pre-upgrade backup (`backup_first`) is skipped
 automatically for your token — it would land in admin-only `_backups/`, which
 you can't read back — so there's no safety net: if an upgrade breaks the
-instance, delete and re-create. The job `result` carries a best-effort
-`dhis2_major_version` that may still show the old major until migrations
-finish — confirm the upgrade landed by polling `GET /instances?full=1` (or
-`/api/system/info`) until it reports the new version.
+instance, delete and re-create. The upgrade job holds until the instance is
+ready before finishing, so its `result.dhis2_major_version` reflects the
+migrated schema — no separate poll needed to confirm the upgrade landed.
 
 **Doris analytics backend** (`"analytics": "doris"` on create): adds a
 dedicated Apache Doris analytics database as a sidecar container. Only for
@@ -258,13 +259,24 @@ print(con.run("SELECT count(*) FROM datavalue"))
   curl -s -X POST -H "$H" $B/instances/agent-<name>/stop
   curl -s -X POST -H "$H" $B/instances/agent-<name>/start
   ```
-- **Startup time**: a create/reset job succeeds when the containers are up —
-  DHIS2 then still needs 1–5 minutes to boot (10–25 on a cross-version seed
-  migration). Poll `GET /instances?full=1` and wait for
-  `"readiness": "ready"` — the broker probes `/api/system/info` for you and
-  distinguishes `deploying` (nothing on `/api` yet) from `migrating`
-  (Flyway/context startup). Polling `/api/system/info` yourself works too;
-  502/connection-refused just means Tomcat is still starting.
+- **Startup time**: DHIS2 needs 1–5 minutes to boot after its containers are
+  up (10–25 on a cross-version seed migration). The broker now folds this wait
+  into the job itself — a create/reset job stays `running` until the instance's
+  API answers, then goes terminal — so **a `succeeded` create/reset job already
+  means the API is up**; you usually don't need a separate readiness poll.
+  `GET /instances?full=1` still reports `readiness`
+  (`deploying`/`migrating`/`ready`) if you want to watch a boot in progress.
+- **Probe directly to start work as early as possible**: for **metadata** work
+  (imports, indicators, schemas, API behavior) the API is usable well before a
+  boot fully settles — probe it yourself rather than waiting on the job or
+  `readiness: ready`. An authenticated `curl -u local_admin:district
+  <url>/api/system/info` returning a `version`, or any real metadata query
+  returning `200`, means you can go; 401/403 also means the API is up (auth is
+  enforcing); 404/502/connection-refused mean Tomcat is still starting.
+  **Caveat: API-usable ≠ analytics/resource tables built.** `readiness: ready`
+  (and a direct `system/info`) reflect metadata usability only — do **not**
+  kick off analytics on that signal; an analytics run needs its resource tables
+  generated first.
 - **Warm the app before API-only smoke tests**: on a freshly booted (or
   restarted) instance, some legacy endpoints can persistently 500 —
   e.g. `GET /api/authorities` returning

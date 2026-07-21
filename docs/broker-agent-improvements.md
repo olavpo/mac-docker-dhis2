@@ -1,10 +1,44 @@
-# d2-broker improvements from agent-review feedback
+# d2-broker status & open improvements
 
-Suggestions surfaced while agents used the broker for multi-version DHIS2 app
-reviews (2026-07). Same contract style as [proposed-broker-endpoints.md](./proposed-broker-endpoints.md).
+Running status of broker changes surfaced by agent-review feedback and client
+needs. The living API contract is [broker-api.md](./broker-api.md) /
+[broker.md](./broker.md); this file tracks what shipped and what's still open.
 Broker source: `dhis2-docker-tools/bash-scripts-docker/d2-broker`.
 
 ## Done
+
+- **Boot-gate: booting jobs hold until the API is ready** (2026-07-21). After a
+  `create` / `reset` / `start` / `upgrade` / `memory` job's steps succeed, the
+  worker blocks (`wait_for_boot()`) until the instance reports `ready` or
+  `D2_BROKER_BOOT_WAIT` seconds (default 1800) elapse, *before* the job
+  finishes. Because the single worker is globally serialized, this serializes
+  app boot: the next booting job can't start its heavy Flyway migration until
+  this instance is up, ending the mutual starvation of two concurrent boots.
+  Best-effort — a cap timeout releases the worker with a log line and does not
+  fail the job. Side benefit: `upgrade`'s `dhis2_major_version` is now read
+  post-migration, so it's accurate. Depends on the readiness fix below. (Was
+  proposed #4.)
+
+- **Readiness probe authenticates; `ready` reflects real usability**
+  (field 2026-07-16, auth fix 2026-07-21). `readiness` on `GET
+  /instances?full=1`: `deploying` (no HTTP answer on `/api`) / `migrating`
+  (HTTP answers, no version yet) / `ready` / `null` (not running). The probe
+  (`instance_readiness()`) now sends HTTP Basic auth for the guaranteed
+  `local_admin`/`district` superuser: anonymous `/api/system/info` omits the
+  `version` field, so the original unauthenticated probe sat at `migrating`
+  long after the API was usable (often never flipping). Authenticated, `ready`
+  trips when the API actually serves metadata (a 401/403 still counts —
+  the security layer is up). Note `ready` = metadata-usable, **not** that
+  analytics / resource tables are built. (Auth fix was proposed #8.)
+
+- **D2Manager endpoints shipped** — consolidates the former
+  `proposed-broker-endpoints.md` (removed; superseded by `broker-api.md`). The
+  "stopped instances vanish from `GET /instances`" bug is fixed:
+  `list_instances()` enumerates by **instance directory** and derives status by
+  probing containers (`running` / `partial` / `stopped`), so `stop` can keep
+  using `docker compose down` while stopped instances still list. And
+  `POST /instances/<name>/backup` (admin-only) and
+  `POST /instances/<name>/upgrade` are both implemented and documented.
 
 - **Refuse in-place upgrades across the Tomcat 9→10 boundary.** `POST
   /instances/<name>/upgrade` with a `version` that needs a different Tomcat
@@ -15,13 +49,6 @@ Broker source: `dhis2-docker-tools/bash-scripts-docker/d2-broker`.
   guard in `upgrade_instance`.) A *true* in-place swap — recreating the Tomcat
   container on the new image while preserving DB/volumes — remains unimplemented
   and is the harder follow-up if cross-boundary upgrade is ever needed.
-
-- **Instance readiness on `GET /instances?full=1`** (2026-07-16). `readiness`
-  field per instance: `deploying` (no HTTP answer on `/api`) / `migrating`
-  (HTTP answers, `system/info` has no version yet) / `ready` (200 with
-  version, or 401/403) / `null` (not running). Probed from the broker on the
-  host-published port with a 3 s timeout (`instance_readiness()`). Only on
-  `full=1`, same as `dhis2_major_version`.
 
 - **`created_at` + `label` on instances** (2026-07-16). `POST /instances`
   accepts an optional free-text `label` (≤ 100 printable chars); the broker
@@ -37,6 +64,11 @@ Broker source: `dhis2-docker-tools/bash-scripts-docker/d2-broker`.
 
 ## Proposed
 
+> **Review 2026-07-21:** #4 (concurrent-boot gate) and #8 (readiness accuracy)
+> are now implemented — see Done. Of the rest, **#6** is a useful host-side
+> seed-prep task; #2 and #5 are largely obsolete; #3 and #7 are low-value /
+> edge. (Numbering keeps the original gaps for stability.)
+
 ### 2. Per-seed credential metadata on `GET /seeds`
 
 **Problem:** some seeds ship with `admin` disabled or a non-default password
@@ -50,6 +82,11 @@ quirk up front would still save confusion.
 `{"admin_disabled": true, "note": "use local_admin/district"}`. Purely
 advisory; no behavior change. Alternatively, keep it out of the API and rely on
 `local_admin` being universal (documented in the `dhis2-instances` skill).
+
+**Status (review 2026-07):** largely obsolete. The guaranteed
+`local_admin`/`district` superuser — now ensured on create *and* restore —
+already solves the underlying "can't log in" problem. Recommend the documented
+alternative (skill: "use local_admin/district") and dropping the API surface.
 
 ### 3. `stopped_reason` / event on host-initiated stops
 
@@ -65,19 +102,11 @@ exists) and surface it on `GET /instances`. Stops done directly via Docker
 can't carry a reason — documenting "instances may be found stopped; `start`
 is cheap; check status before long test runs" in the skill covers that half.
 
-### 4. Fail fast / queue when a create would boot concurrently
-
-**Problem:** two DHIS2 instances *booting* at once starve each other (20+
-min with nothing on `/api`); agents discover the constraint the hard way.
-The jobs queue already serializes create/reset *jobs*, but a create job
-finishes when containers are up — DHIS2 keeps booting long after, so a
-second create can start while the first is still migrating.
-
-**Proposed:** before running a create/reset job, check for another instance
-with `readiness` in (`deploying`, `migrating`); either delay the job start
-(status `queued`, log line "waiting for <name> to finish booting") or —
-simpler — return an advisory field in the job response. Needs care: an
-instance stuck un-ready forever must not deadlock the queue (cap the wait).
+**Status (review 2026-07):** low marginal value. The broker has no autonomous
+stop path — it only stops on an explicit `POST /stop`, where the reason is
+just "stopped via API". The genuinely confusing cases (host resource
+management, manual `docker stop`) are exactly the ones the broker can't
+annotate. The skill-doc guidance captures nearly all the value.
 
 ### 5. Broker-side warm-up folded into the readiness probe
 
@@ -88,6 +117,12 @@ Agents re-implement the warm-up.
 **Proposed:** when the readiness probe first sees `ready` on an instance
 with DHIS2 major ≤ 41, fire one GET at the Struts login page. One line of
 state per instance ("warmed") in `_broker/meta/`.
+
+**Status (review 2026-07):** low and shrinking value (≤ 2.41 only; ages out as
+the fleet moves to 42/43). If ever done, keep it **out** of the readiness
+probe — `GET /instances?full=1` must stay a pure read (a probe that fires
+state-changing warm-up GETs would repeat on every poll). Make it an explicit
+create-time step instead.
 
 ### 6. Pre-migrated Laos seeds for v42/v43 (seed prep, not code)
 
@@ -105,3 +140,11 @@ queue; demo seeds ship neither, so agents hand-build them
 A seed variant with a long-running job + queue pre-configured — or a broker
 "fixture" helper — would make this turnkey. Same class of gap: no seed has a
 configured predictor.
+
+**Conflict with disable-jobs-on-restore (shipped 2026-07-20):** every restore
+now sets `jobconfiguration.enabled = false` on all rows, so a fixture seed
+shipping a *running* job/queue would arrive with that job **disabled** — the
+fixture is neutered on the way in. A fixture approach must therefore configure
+jobs *post*-restore (via API), carve a documented exception into
+`disable_scheduled_jobs`, or have the reviewer re-enable the specific fixture
+jobs after reset.
