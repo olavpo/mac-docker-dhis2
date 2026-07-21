@@ -143,7 +143,9 @@ Postgres until 43. Background and sizing:
 
 A known `local_admin` / `district` superuser (`ALL` authority) is ensured on
 every restore and create, independent of the restored database's own `admin`,
-and is stripped from backup dumps.
+and is stripped from backup dumps. Every restore also disables all scheduled
+jobs in the restored database, so restored seeds never fire analytics,
+predictor or sync jobs on their own.
 
 `seed` accepts, by scope:
 

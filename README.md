@@ -70,7 +70,7 @@ All scripts are in `bash-scripts-docker/` and expect:
 
 - **Database**
   - `d2-db-backup` — backup DB to `$DHIS2_BASE/_backups/<instance>/...`
-  - `d2-db-restore` — restore DB from `.sql`, `.sql.gz`, or `.pgc`
+  - `d2-db-restore` — restore DB from `.sql`, `.sql.gz`, or `.pgc`; disables all scheduled jobs in the restored DB
   - `d2-local-admin` — ensure/remove the known `local_admin` superuser in an instance DB
   - `d2-db-version` — restore a backup into a temp instance and read `flyway_schema_history`
   - `d2-psql` — open `psql` inside the DB container
@@ -142,6 +142,11 @@ Restore:
 ```bash
 d2-db-restore myinstance $DHIS2_BASE/_backups/myinstance/myinstance_20240101-120000_v41.sql.gz
 ```
+
+Every restore disables **all** scheduled jobs (`jobconfiguration.enabled = false`)
+in the restored database — analytics runs, predictors, sync jobs and built-in
+housekeeping alike — so nothing suddenly triggers on a local instance.
+Re-enable individual jobs in the Scheduler app if you need them.
 
 ---
 

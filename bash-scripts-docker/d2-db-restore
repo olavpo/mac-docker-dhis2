@@ -179,6 +179,29 @@ if ! "$SCRIPT_DIR/d2-local-admin" "$INSTANCE" add; then
   echo "⚠️  Warning: could not ensure local_admin (restore itself succeeded)"
 fi
 
+# Disable ALL scheduled jobs in the restored DB (analytics, predictors, sync
+# jobs, housekeeping) so nothing suddenly triggers on a local instance. Tomcat
+# is still stopped, so the scheduler never sees them enabled. Best-effort,
+# like local_admin above.
+# See docs/superpowers/specs/2026-07-20-disable-jobs-on-restore-design.md
+disable_scheduled_jobs() {
+  local has_table count
+  has_table=$(docker exec "$DB_CONTAINER" psql -U dhis -d dhis2 -tA -v ON_ERROR_STOP=1 \
+    -c "SELECT to_regclass('public.jobconfiguration') IS NOT NULL;") || return 1
+  if [ "$has_table" != "t" ]; then
+    echo "No jobconfiguration table in this database; nothing to disable"
+    return 0
+  fi
+  count=$(docker exec "$DB_CONTAINER" psql -U dhis -d dhis2 -tA -v ON_ERROR_STOP=1 \
+    -c "WITH updated AS (UPDATE jobconfiguration SET enabled = false WHERE enabled RETURNING 1) SELECT count(*) FROM updated;") || return 1
+  echo "Disabled $count scheduled job(s)"
+}
+
+echo "Disabling scheduled jobs..."
+if ! disable_scheduled_jobs; then
+  echo "⚠️  Warning: could not disable scheduled jobs (restore itself succeeded)"
+fi
+
 # Restart Tomcat container
 echo "Restarting Tomcat container..."
 if [ -n "$TOMCAT_CONTAINER" ]; then
