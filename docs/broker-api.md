@@ -4,7 +4,8 @@ A UI-focused companion to [broker.md](./broker.md). That document explains
 why the broker exists and how it is operated; this one is the contract you
 build a client against. Read it first if you are wiring up a menu bar app,
 web dashboard, Electron/Tauri shell, or any other client that talks to
-`d2-broker`.
+`d2-broker`. (For MCP clients like Claude Desktop, a ready-made adapter
+exists: [broker-mcp.md](./broker-mcp.md).)
 
 The broker source is `bash-scripts-docker/d2-broker` (Python 3, stdlib
 only); this document tracks what it actually does.

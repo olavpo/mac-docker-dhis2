@@ -7,6 +7,9 @@ clients:
 
 - **AI agent sandboxes** ([ai-agentic-sandbox](https://github.com/olavpo/ai-agentic-sandbox))
   reach it at `http://host.docker.internal:9300` with a restricted token.
+- **Local MCP clients** (Claude Desktop, Claude Code) through
+  [`d2-broker-mcp`](./broker-mcp.md), a stdio adapter that uses the
+  restricted agent token.
 - **Your own tooling** (a menu bar widget, a dashboard, `curl` from the host)
   with the admin token.
 

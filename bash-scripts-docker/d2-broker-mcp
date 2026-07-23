@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+#       ____  __  ______________
+#      / __ \/ / / /  _/ ___/__ \
+#     / / / / /_/ // / \__ \__/ /
+#    / /_/ / __  // / ___/ / __/
+#   /_____/_/ /_/___/____/____/
+#
+#   d2-broker-mcp — MCP stdio server over the d2-broker HTTP API, so a
+#   local MCP client (Claude Desktop, Claude Code) can spin up disposable
+#   DHIS2 instances to test and validate things.
+#
+#   Deliberately agent-scoped: it authenticates with the broker's "agent"
+#   token, confining the client to agent-* instances, the instance cap,
+#   and curated seeds. It never reads the admin token. The broker stays
+#   loopback-bound and unchanged — this is just a protocol adapter.
+#
+#   The MCP client spawns this process and speaks newline-delimited
+#   JSON-RPC 2.0 on stdin/stdout (the MCP stdio transport). stdout is
+#   protocol-only; diagnostics go to stderr. No dependencies beyond the
+#   Python 3 standard library. See docs/broker-mcp.md for client setup.
+#
+#   Configuration (env vars):
+#     DHIS2_BROKER_URL    Broker base URL (default http://localhost:9300).
+#     DHIS2_BROKER_TOKEN  Bearer token. If unset, the agent token is read
+#                         from $DHIS2_BASE/_broker/tokens.json.
+#     DHIS2_BASE          Instance base dir (default ~/dhis2). GUI-spawned
+#                         processes don't inherit shell env, hence the
+#                         default.
+
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+PROTOCOL_VERSION = "2025-06-18"
+SERVER_INFO = {"name": "d2-broker-mcp", "version": "1.0.0"}
+HTTP_TIMEOUT = 15       # broker answers fast; long work is a job
+POLL_INTERVAL = 2.0     # wait_for_job re-fetch cadence
+WAIT_DEFAULT = 60
+WAIT_MAX = 240
+TERMINAL_STATUSES = {"succeeded", "failed", "interrupted"}
+
+
+# ---------------------------------------------------------------- config
+
+def broker_url():
+    return os.environ.get("DHIS2_BROKER_URL",
+                          "http://localhost:9300").rstrip("/")
+
+
+class ConfigError(Exception):
+    pass
+
+
+def resolve_token():
+    token = os.environ.get("DHIS2_BROKER_TOKEN")
+    if token:
+        return token
+    base = os.environ.get("DHIS2_BASE") or str(Path.home() / "dhis2")
+    path = Path(base) / "_broker" / "tokens.json"
+    try:
+        with open(path) as f:
+            return json.load(f)["agent"]["token"]
+    except (OSError, KeyError, ValueError):
+        raise ConfigError(
+            f"no broker token: set DHIS2_BROKER_TOKEN, or make sure the "
+            f"agent token is readable at {path} (create it with "
+            f"'d2-broker tokens')")
+
+
+# ------------------------------------------------------------ broker HTTP
+
+class BrokerUnreachable(Exception):
+    pass
+
+
+def broker_request(method, path, body=None):
+    """Call the broker; return (status, parsed-JSON-body)."""
+    url = broker_url() + path
+    data = json.dumps(body).encode() if body is not None else None
+    request = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Authorization": f"Bearer {resolve_token()}",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            payload = {"error": raw.decode(errors="replace") or e.reason}
+        return e.code, payload
+    except (urllib.error.URLError, TimeoutError) as e:
+        reason = getattr(e, "reason", e)
+        raise BrokerUnreachable(
+            f"broker not reachable at {broker_url()} ({reason}) — is it "
+            f"running? Check with 'd2-broker status'.")
+
+
+# ----------------------------------------------------------------- tools
+
+def _pretty(payload):
+    return json.dumps(payload, indent=2)
+
+
+def tool_list_instances(args):
+    return broker_request("GET", "/instances?full=1")
+
+
+def tool_create_instance(args):
+    body = {k: args[k] for k in
+            ("name", "version", "seed", "memory", "label") if k in args}
+    return broker_request("POST", "/instances", body)
+
+
+def tool_reset_instance(args):
+    return broker_request("POST", f"/instances/{args['name']}/reset",
+                          {"seed": args["seed"]})
+
+
+def tool_start_instance(args):
+    return broker_request("POST", f"/instances/{args['name']}/start", {})
+
+
+def tool_stop_instance(args):
+    return broker_request("POST", f"/instances/{args['name']}/stop", {})
+
+
+def tool_delete_instance(args):
+    return broker_request("DELETE", f"/instances/{args['name']}")
+
+
+def tool_list_seeds(args):
+    return broker_request("GET", "/seeds")
+
+
+def tool_get_job(args):
+    return broker_request("GET", f"/jobs/{args['job_id']}")
+
+
+def tool_wait_for_job(args):
+    timeout = min(max(args.get("timeout_seconds", WAIT_DEFAULT), 0), WAIT_MAX)
+    deadline = time.monotonic() + timeout
+    while True:
+        status, job = broker_request("GET", f"/jobs/{args['job_id']}")
+        if status >= 400 or job.get("status") in TERMINAL_STATUSES:
+            return status, job
+        if time.monotonic() >= deadline:
+            return status, job  # still running; caller can wait again
+        time.sleep(POLL_INTERVAL)
+
+
+_NAME_ARG = {"type": "string",
+             "description": "Instance name (agent-* namespace)."}
+_JOB_ARG = {"type": "string",
+            "description": "Job id, e.g. j-1a2b3c4d."}
+
+# Mutations return 202 + a job object: pass job.id to wait_for_job. The
+# broker runs one job at a time, so queued jobs may wait for another's boot.
+_JOB_NOTE = (" Returns a job (202) — poll it to completion with "
+             "wait_for_job.")
+
+TOOLS = [
+    {
+        "name": "list_instances",
+        "description":
+            "List DHIS2 instances visible to this (agent-scoped) token, "
+            "with per-instance readiness and DHIS2 version. readiness "
+            "'ready' means the API is metadata-usable — analytics/resource "
+            "tables may still need generating.",
+        "inputSchema": {"type": "object", "properties": {},
+                        "additionalProperties": False},
+    },
+    {
+        "name": "create_instance",
+        "description":
+            "Create a disposable DHIS2 instance. Name must start with "
+            "'agent-'. Creating on a fresh or seeded DB can take many "
+            "minutes (Flyway migrations)." + _JOB_NOTE,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string",
+                         "description": "Must start with 'agent-'; "
+                         "lower-case, 2-30 chars."},
+                "version": {"type": "string",
+                            "description": "DHIS2 version, e.g. '42', "
+                            "'2.42' (latest stable of that major) or "
+                            "'2.42.4'. Omit for the broker's default."},
+                "seed": {"type": "string",
+                         "description": "Seed database from list_seeds "
+                         "(e.g. a Sierra Leone demo DB). Omit for an "
+                         "empty database."},
+                "memory": {"type": "string",
+                           "description": "Tomcat max heap, e.g. '2g' "
+                           "(default 4g)."},
+                "label": {"type": "string",
+                          "description": "Free-text label (<=100 chars) "
+                          "shown in list_instances — useful to mark what "
+                          "this instance is for."},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "reset_instance",
+        "description":
+            "Restore an instance's database from a seed (see list_seeds), "
+            "discarding all current data." + _JOB_NOTE,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": _NAME_ARG,
+                "seed": {"type": "string",
+                         "description": "Seed path from list_seeds."},
+            },
+            "required": ["name", "seed"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "start_instance",
+        "description": "Start a stopped instance." + _JOB_NOTE,
+        "inputSchema": {"type": "object", "properties": {"name": _NAME_ARG},
+                        "required": ["name"], "additionalProperties": False},
+    },
+    {
+        "name": "stop_instance",
+        "description":
+            "Stop a running instance (containers down, data kept)."
+            + _JOB_NOTE,
+        "inputSchema": {"type": "object", "properties": {"name": _NAME_ARG},
+                        "required": ["name"], "additionalProperties": False},
+    },
+    {
+        "name": "delete_instance",
+        "description":
+            "Delete an instance: containers, volumes and data are removed "
+            "IRREVERSIBLY." + _JOB_NOTE,
+        "inputSchema": {"type": "object", "properties": {"name": _NAME_ARG},
+                        "required": ["name"], "additionalProperties": False},
+    },
+    {
+        "name": "list_seeds",
+        "description":
+            "List seed databases available for create_instance / "
+            "reset_instance. Filenames carry a _vNN DHIS2-version token; "
+            "don't restore a seed newer than the instance's version.",
+        "inputSchema": {"type": "object", "properties": {},
+                        "additionalProperties": False},
+    },
+    {
+        "name": "get_job",
+        "description":
+            "Fetch a job's current state, including the last lines of its "
+            "log (log_tail).",
+        "inputSchema": {"type": "object", "properties": {"job_id": _JOB_ARG},
+                        "required": ["job_id"], "additionalProperties": False},
+    },
+    {
+        "name": "wait_for_job",
+        "description":
+            "Wait for a job to finish, up to timeout_seconds. Returns the "
+            "job with its log_tail either way — if status is still "
+            "'queued'/'running' after the timeout, call again to keep "
+            "waiting (instance creation can take many minutes).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": _JOB_ARG,
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": f"Seconds to wait before returning a "
+                    f"still-running job (default {WAIT_DEFAULT}, "
+                    f"max {WAIT_MAX}).",
+                    "minimum": 0, "maximum": WAIT_MAX,
+                },
+            },
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+TOOL_FUNCS = {t["name"]: globals()[f"tool_{t['name']}"] for t in TOOLS}
+
+
+def call_tool(name, arguments):
+    """Run a tool; return an MCP tools/call result object."""
+    try:
+        status, payload = TOOL_FUNCS[name](arguments)
+    except (ConfigError, BrokerUnreachable) as e:
+        return {"content": [{"type": "text", "text": str(e)}],
+                "isError": True}
+    except KeyError as e:
+        return {"content": [{"type": "text",
+                             "text": f"missing required argument: {e}"}],
+                "isError": True}
+    if status >= 400:
+        text = payload.get("error") or _pretty(payload)
+        return {"content": [{"type": "text", "text": text}],
+                "isError": True}
+    return {"content": [{"type": "text", "text": _pretty(payload)}]}
+
+
+# -------------------------------------------------------------- protocol
+
+def _result(id_, result):
+    return {"jsonrpc": "2.0", "id": id_, "result": result}
+
+
+def _error(id_, code, message):
+    return {"jsonrpc": "2.0", "id": id_,
+            "error": {"code": code, "message": message}}
+
+
+def handle_message(msg):
+    """Handle one JSON-RPC message; return the response dict or None."""
+    method = msg.get("method", "")
+    id_ = msg.get("id")
+    if id_ is None:      # notification — never answered
+        return None
+    if method == "initialize":
+        return _result(id_, {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {"tools": {}},
+            "serverInfo": SERVER_INFO,
+        })
+    if method == "ping":
+        return _result(id_, {})
+    if method == "tools/list":
+        return _result(id_, {"tools": TOOLS})
+    if method == "tools/call":
+        params = msg.get("params") or {}
+        name = params.get("name")
+        if name not in TOOL_FUNCS:
+            return _error(id_, -32602, f"unknown tool: {name}")
+        return _result(id_, call_tool(name, params.get("arguments") or {}))
+    return _error(id_, -32601, f"method not found: {method}")
+
+
+def handle_line(line):
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        return _error(None, -32700, "parse error")
+    return handle_message(msg)
+
+
+def main():
+    for line in sys.stdin:
+        response = handle_line(line)
+        if response is not None:
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()
