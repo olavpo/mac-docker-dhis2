@@ -33,6 +33,12 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
   it to plan version matrices. Note the **Laos HMIS demo seed exists only as
   v41**: it boots fine on a 2.42/2.43 instance, but Flyway migrates it on
   first boot, which takes **10–25 minutes** with nothing answering on `/api`.
+  **Seeds are snapshots and age at different rates** — the SL v40 seed's
+  tracker data ends Aug 2024 and its aggregate data lags years further, while
+  the v43 seed is current. Relative periods (`LAST_12_MONTHS` etc.) silently
+  return nothing on a stale seed: before building tests on them, check data
+  recency (e.g. `SELECT max(occurreddate) FROM event;` or the newest period in
+  a quick analytics query) and prefer fixed periods that match the data.
 - There is a cap on concurrent `agent-*` instances — it counts **stopped
   instances too**, including stale leftovers from earlier sessions. When the
   cap is hit, the error names deletion candidates; delete only `agent-*`
@@ -43,6 +49,12 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
   broker now guards against this — a create/reset job stays `running` until its
   instance's API is up, so a second create you submit waits its turn rather
   than booting alongside the first — but keep the footprint low anyway for RAM.
+  The same contention applies to **any heavy DB work, not just boots**: a seed
+  restore on one instance while another ran analytics stretched an ~11-minute
+  analytics run to ~25 minutes. The broker serializes its own jobs, but work
+  you trigger through an instance's API (analytics runs, large imports/deletes)
+  is invisible to it — so as a rule, run **one heavy operation across all
+  instances at a time**.
 - **Instances can be found `stopped` mid-session** (host-side resource
   management or the user intervening). A long-running dev server pointed at
   one then fails with confusing DNS/proxy errors, not a clear "upstream
@@ -68,6 +80,12 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
 All mutating calls return **202 with a job**; poll until terminal status.
 (Request bodies are parsed as JSON regardless of the Content-Type header,
 so plain `curl -d` works too — don't "fix" calls that omit the header.)
+
+**Response shapes differ:** the 202 wraps the job as
+`{"job": {...}, "poll": "/jobs/<id>", "log": "/jobs/<id>/log"}`, but
+`GET /jobs/<id>` returns the **bare job object** (same fields, no `"job"`
+wrapper, plus `log_tail`). Don't write polling code that expects the
+wrapper on both.
 
 ```bash
 B="$DHIS2_BROKER_URL"
@@ -178,6 +196,13 @@ a hang. Creates with a `version` download a WAR (hundreds of MB) and seed
 restores can take minutes; expect several minutes end-to-end and don't give
 up early.
 
+**One job per instance:** submitting a job while the instance already has
+one queued/running returns `409` (`already has an active job`) — wait for
+the active job first. The exception is **delete**, which you may submit at
+any time: it queues behind the active job and runs after it (handy when a
+start/create is holding for minutes and you've decided you don't need the
+instance).
+
 **When a job fails** (`status: "failed"`): the `error` field says which step
 exited non-zero; the actual cause is in the output — check `log_tail` in the
 job response first, and fetch `GET /jobs/<id>/log` for the full transcript.
@@ -277,6 +302,21 @@ print(con.run("SELECT count(*) FROM datavalue"))
   (and a direct `system/info`) reflect metadata usability only — do **not**
   kick off analytics on that signal; an analytics run needs its resource tables
   generated first.
+- **Running analytics to completion** (needed before any `/api/analytics`
+  query returns data):
+
+  ```bash
+  curl -s -X POST -u local_admin:district http://dhis2-<name>:8080/api/resourceTables/analytics
+  # then poll until a notification says "Analytics tables updated":
+  curl -s -u local_admin:district http://dhis2-<name>:8080/api/system/tasks/ANALYTICS_TABLE
+  ```
+
+  Or simpler: poll an actual `/api/analytics` query until rows appear.
+  Expect **~10–15 min on the SL seed**, longer under contention (see the
+  one-heavy-operation rule above). If the task never touches aggregate
+  data (tracker-only work), `TRUNCATE datavalue` via direct DB access
+  before generating analytics — it cut runtime from 30+ min to ~5 min on
+  the big seeds (`skipTableTypes` is not honored on 2.41).
 - **Warm the app before API-only smoke tests**: on a freshly booted (or
   restarted) instance, some legacy endpoints can persistently 500 —
   e.g. `GET /api/authorities` returning
