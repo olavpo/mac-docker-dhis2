@@ -51,7 +51,7 @@ Status codes used by the broker:
 | `403` | Token lacks the required scope (e.g. agent token on non-agent instance, agent token requesting a backup seed or a `war_url`) |
 | `404` | Instance, job, seed, or route not found |
 | `405` | Method not allowed for this path |
-| `409` | Conflict: instance already exists, instance has an active job, or agent cap reached |
+| `409` | Conflict: instance already exists, instance has an active job (delete is exempt — see `DELETE /instances/<name>`), or agent cap reached |
 | `413` | Request body > 64 KiB |
 | `500` | Unhandled exception in the broker |
 
@@ -94,7 +94,9 @@ a half-written `succeeded`.
 A single global worker processes the queue. Two POSTs to different
 instances at the same time both succeed (both get `202`), but they run
 sequentially. A second POST targeting an **instance that already has an
-active job** gets `409`.
+active job** gets `409` — except a **delete**, which queues behind the
+active job and runs after it (a second delete on the same instance
+still gets `409`).
 
 Jobs that boot the app (`create`, `reset`, `start`, `upgrade`, `memory`)
 stay `running` until the instance's API answers as `ready` — not merely
@@ -279,6 +281,12 @@ survive `docker compose down`).
 
 Stops, removes containers + volumes, deletes the instance directory.
 Irreversible. Returns **202 + job**.
+
+Unlike the other mutations, a delete is accepted even while the instance
+has an active job: it queues behind it and runs once that job finishes
+(useful because start/create jobs hold for minutes waiting on boot). A
+delete is only rejected with `409` when a delete for the instance is
+already queued or running.
 
 ### `POST /instances/<name>/backup`
 

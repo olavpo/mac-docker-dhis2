@@ -634,7 +634,10 @@ class JobManager:
         Raises ApiError(409) if the instance already has a queued/running
         job — checked under the same lock hold as the enqueue, so two
         concurrent requests for one instance can't both pass (the handler's
-        check_no_active_job is only an early fast-fail)."""
+        check_no_active_job is only an early fast-fail). Exception: a
+        delete may queue behind any active op (the serial worker runs it
+        after, superseding whatever that op produced) — but not behind
+        another delete."""
         job = {
             "id": "j-" + secrets.token_hex(4),
             "op": op,
@@ -651,10 +654,12 @@ class JobManager:
             active = [j for j in self.jobs.values()
                       if j["instance"] == instance
                       and j["status"] in ("queued", "running")]
-            if active:
+            blocking = active if op != "delete" else [
+                j for j in active if j["op"] == "delete"]
+            if blocking:
                 raise ApiError(409, f"instance '{instance}' already has an "
-                                    f"active job: {active[0]['id']} "
-                                    f"({active[0]['op']})")
+                                    f"active job: {blocking[0]['id']} "
+                                    f"({blocking[0]['op']})")
             self.jobs[job["id"]] = job
         self._persist(job)
         self.queue.put((job, steps, post_cmds or [], cleanup or []))
@@ -1207,7 +1212,8 @@ class Handler(BaseHTTPRequestHandler):
             name = parts[1]
             self.check_name(name, scope)
             self.require_instance(name)
-            self.check_no_active_job(name)
+            # No check_no_active_job: a delete queues behind an active job
+            # (submit() still rejects a second delete).
             argv = [str(SCRIPT_DIR / "d2-instance-delete"), name]
             return self.job_response(self.jobs.submit("delete", name, [argv]))
         raise ApiError(404, "not found")

@@ -409,8 +409,8 @@ class SubmitExclusive(unittest.TestCase):
             os.environ["DHIS2_BASE"] = self._old_base
         self._tmp.cleanup()
 
-    def _fake_active(self, instance, status):
-        job = {"id": "j-fake", "op": "create", "instance": instance,
+    def _fake_active(self, instance, status, op="create"):
+        job = {"id": "j-fake", "op": op, "instance": instance,
                "status": status, "created_at": broker.now_iso()}
         self.mgr.jobs[job["id"]] = job
 
@@ -434,6 +434,23 @@ class SubmitExclusive(unittest.TestCase):
         self._fake_active("foo", "failed")
         job = self.mgr.submit("stop", "foo", [])
         self.assertEqual(job["instance"], "foo")
+
+    def test_delete_queues_behind_active_job(self):
+        self._fake_active("foo", "running", op="start")
+        job = self.mgr.submit("delete", "foo", [])
+        self.assertEqual(job["op"], "delete")
+        self.assertEqual(job["status"], "queued")
+
+    def test_delete_rejected_behind_delete(self):
+        self._fake_active("foo", "queued", op="delete")
+        with self.assertRaises(broker.ApiError) as ctx:
+            self.mgr.submit("delete", "foo", [])
+        self.assertEqual(ctx.exception.status, 409)
+
+    def test_other_op_rejected_behind_queued_delete(self):
+        self._fake_active("foo", "queued", op="delete")
+        with self.assertRaises(broker.ApiError):
+            self.mgr.submit("start", "foo", [])
 
 
 if __name__ == "__main__":
