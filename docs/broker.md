@@ -159,6 +159,11 @@ and is stripped from backup dumps. Every restore also disables all scheduled
 jobs in the restored database, so restored seeds never fire analytics,
 predictor or sync jobs on their own.
 
+Backup dumps exclude the analytics tables (`analytics` and `analytics_*`), so
+an instance restored from a backup has no analytics until it is rebuilt. The
+curated `_seeds/` dumps carry none either, so this matches how seeds already
+behave.
+
 `seed` accepts, by scope:
 
 | Form | Example | Who |
