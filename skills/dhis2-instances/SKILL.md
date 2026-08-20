@@ -60,14 +60,22 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
   one then fails with confusing DNS/proxy errors, not a clear "upstream
   gone". If something that worked stops resolving, check `GET /instances`
   first — `start` is cheap and preserves state.
+- **`running` does not mean reachable moment-to-moment**: a host-side Tomcat
+  restart leaves the status `running` while the API refuses connections for a
+  minute or two. If a test suddenly fails with connection-refused or a
+  timeout, re-probe `/api/system/info` and re-run once it answers, before
+  treating the failure as an app bug.
 - **Backups are admin-only**: `POST /instances/<name>/backup` returns `403`
   for your token (`_backups/` is the user's territory). To get clean or known
   state, reset from a seed or delete and re-create — don't try to back up.
 - **Guaranteed superuser:** every instance you create or reset has a
   `local_admin` / `district` superuser (`ALL` authority), added by the host
-  tooling regardless of the restored database's own `admin`. Prefer it when a
-  seed's `admin` is disabled or has an unknown password. It's stripped from
-  backups, so it never appears in dumps.
+  tooling regardless of the restored database's own `admin`. Make it your
+  default login: a seed's `admin` may be disabled, have an unknown password,
+  or — subtler — authenticate fine yet **lack the `ALL` authority**, so
+  anything that creates users or grants roles fails with
+  `409 ... is not allowed to grant users access to user role ...`. It's
+  stripped from backups, so it never appears in dumps.
 - **Don't set `tomcat` when you pass a `version`** — the broker auto-selects the
   compatible Tomcat (DHIS2 ≤ 2.41 needs Tomcat 9, ≥ 2.42 needs Tomcat 10). A
   conflicting `tomcat` makes the create job fail.
@@ -328,7 +336,19 @@ print(con.run("SELECT count(*) FROM datavalue"))
   filed as a finding — it's an environment quirk, not an app bug.
 - An empty instance (created with a `version` but no seed) has no
   organisation units or metadata, and only the `admin` and `local_admin`
-  users — import what you need, or use a seed.
+  users — import what you need, or use a seed. After importing an org-unit
+  hierarchy, users still have **no org units assigned**, so apps render
+  empty states (`/api/me` returns no `organisationUnits`): assign the
+  hierarchy root to `organisationUnits`, `dataViewOrganisationUnits` and
+  `teiSearchOrganisationUnits` on the users you test with. On 2.42 a
+  plain-JSON `PATCH /api/users/<id>` is rejected — use the JSON-Patch
+  content type (`application/json-patch+json`).
+- **The CORS allowlist starts empty** on every fresh instance, so a
+  browser app served from a dev server (a different origin) fails at login
+  with a CORS error. On 2.42 this is a configuration resource, not a system
+  setting — there is no `keyCorsWhitelist` under `/api/systemSettings`. The
+  working call is `POST /api/configuration/corsAllowlist` with a bare JSON
+  array of origins (e.g. `["http://localhost:3000"]`), which returns 204.
 - **Exercising job/scheduler features**: no seed ships a running job or a
   scheduler queue. Build one in seconds: create 2–3 job configurations
   (`POST /api/jobConfigurations` with e.g.
