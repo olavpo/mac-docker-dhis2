@@ -2,6 +2,39 @@ services:
   db:
     image: ghcr.io/baosystems/postgis:16-3.5
     restart: always
+    # DHIS2 tuning (docs.dhis2.org sysadmin guide) scaled to a ~2GB Postgres
+    # budget — the 8GB Docker VM is shared with the Tomcat heap (default 4g)
+    # and optionally Doris. effective_cache_size is a planner hint, not an
+    # allocation. No mem_limit on purpose: an OOM-killed Postgres mid-restore
+    # is worse than brief memory pressure on the VM.
+    command:
+      - postgres
+      - -c
+      - jit=off
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - temp_buffers=16MB
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - synchronous_commit=off
+      - -c
+      - wal_writer_delay=10000ms
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - max_locks_per_transaction=96
+      - -c
+      - track_activity_query_size=8192
+      - -c
+      - checkpoint_completion_target=0.8
+      - -c
+      - max_connections=100
     environment:
       POSTGRES_USER: dhis
       POSTGRES_PASSWORD: dhis
