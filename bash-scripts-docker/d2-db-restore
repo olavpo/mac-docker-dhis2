@@ -135,22 +135,24 @@ restore_stream_sql() {
   docker exec -i "$DB_CONTAINER" psql -U dhis -d dhis2 < "$DUMP_FILE"
 }
 
+# Restore output goes to stdout as well as $RESTORE_LOG: when this runs as a
+# broker job, stdout is the only log a sandboxed client can read.
 if [[ "$DUMP_FILE" == *.pgc ]]; then
   # Use pg_restore for PostgreSQL custom format
   echo "Using pg_restore for PostgreSQL custom format..."
   echo "This may take several minutes depending on database size..."
   # Use --no-owner to avoid ownership errors when postgres role doesn't exist
-  if ! timeout_exec $RESTORE_TIMEOUT docker exec "$DB_CONTAINER" pg_restore -U dhis -d dhis2 -j 4 --no-owner /tmp/restore.pgc > "$RESTORE_LOG" 2>&1; then
+  if ! timeout_exec $RESTORE_TIMEOUT docker exec "$DB_CONTAINER" pg_restore -U dhis -d dhis2 -j 4 --no-owner /tmp/restore.pgc 2>&1 | tee -a "$RESTORE_LOG"; then
     RESTORE_FAILED=1
   fi
 elif [[ "$DUMP_FILE" == *.gz ]]; then
   echo "Streaming gzipped SQL into psql..."
-  if ! timeout_exec $RESTORE_TIMEOUT restore_stream_gz > "$RESTORE_LOG" 2>&1; then
+  if ! timeout_exec $RESTORE_TIMEOUT restore_stream_gz 2>&1 | tee -a "$RESTORE_LOG"; then
     RESTORE_FAILED=1
   fi
 else
   echo "Streaming SQL into psql..."
-  if ! timeout_exec $RESTORE_TIMEOUT restore_stream_sql > "$RESTORE_LOG" 2>&1; then
+  if ! timeout_exec $RESTORE_TIMEOUT restore_stream_sql 2>&1 | tee -a "$RESTORE_LOG"; then
     RESTORE_FAILED=1
   fi
 fi
