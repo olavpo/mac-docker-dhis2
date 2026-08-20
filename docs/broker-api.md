@@ -302,6 +302,8 @@ Body (all optional):
 - `label` matches `^[a-z0-9][a-z0-9_-]{0,39}$`.
 - The DB must be running; on a stopped instance the job `fail`s with a
   "start the instance first" message.
+- Analytics tables (`analytics`, `analytics_*`) are excluded from the dump, so
+  an instance restored from this backup has no analytics until you run it.
 
 On success, `result` is a `GET /seeds`-shaped element for the new backup, so
 it can be offered immediately as a restore source:

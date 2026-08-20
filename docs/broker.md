@@ -125,7 +125,7 @@ stable resolved from releases.dhis2.org) or an exact release (`2.42.4`).
 | `POST /instances/<name>/start` | `docker compose up -d` → 202 job |
 | `POST /instances/<name>/stop` | `docker compose down` → 202 job |
 | `DELETE /instances/<name>` | Stop, remove containers+volumes, delete dir → 202 job |
-| `POST /instances/<name>/backup`†| `pg_dump` the DB to `_backups/<name>/`. Body: `{"label"?}` → 202 job. Requires a running DB. `result` is a `GET /seeds` entry |
+| `POST /instances/<name>/backup`†| `pg_dump` the DB to `_backups/<name>/` (analytics tables excluded). Body: `{"label"?}` → 202 job. Requires a running DB. `result` is a `GET /seeds` entry |
 | `POST /instances/<name>/upgrade` | Swap the WAR, preserving DB+volumes. Body: `{"version" \| "war_url"† \| "war_file"†, "tomcat"?, "backup_first"?}` → 202 job. Rejects downgrades, major-skips, and Tomcat changes |
 | `POST /instances/<name>/memory` | Set Tomcat max heap (`-Xmx`) + recreate Tomcat. Body: `{"memory"}` → 202 job |
 | `GET /seeds` | Seeds available to this token (agent: `_seeds/`; admin: also `backups/...`) |

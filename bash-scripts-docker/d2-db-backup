@@ -17,6 +17,7 @@ fi
 usage() {
   echo "Usage: $0 [-l <label>] <instance name>"
   echo "Creates a timestamped database backup in the common [Backups] directory"
+  echo "Analytics tables are excluded; DHIS2 rebuilds them when analytics runs"
   echo "  -l <label>   optional tag folded into the backup filename"
   exit 1
 }
@@ -88,8 +89,43 @@ echo "Backup will be saved to: $BACKUP_FILE"
   || echo "⚠️  Warning: could not remove local_admin; dump may contain it"
 trap '"$SCRIPT_DIR/d2-local-admin" "$INSTANCE" add >/dev/null 2>&1 || true' EXIT
 
+# Analytics tables hold derived data only, and they usually dominate the dump
+# size. DHIS2 drops and recreates them on the next analytics run, so they are
+# never backed up. The two patterns cover the partitioned "analytics" tables
+# and the analytics_* family (event/enrollment/ownership partitions, the
+# analytics_rs_* resource tables from 2.41 on, and any analytics_temp_*
+# leftovers). They are anchored rather than a bare "analytics*" glob, so a
+# metadata table whose name merely starts with "analytics" stays in the dump.
+PG_DUMP_EXCLUDES=(-T 'analytics' -T 'analytics_*')
+
+# SQL views that read an analytics table are still dumped, but their CREATE
+# VIEW fails on restore until analytics is rebuilt (psql logs the error and
+# carries on, so the restore still succeeds without them). Warn so the gap is
+# visible at backup time. Best-effort: never block the dump.
+warn_views_on_analytics() {
+  local views
+  views=$(docker exec "$DB_CONTAINER" psql -U dhis -d dhis2 -tA -c "
+    SELECT DISTINCT v.relname
+    FROM pg_depend d
+    JOIN pg_rewrite r ON r.oid = d.objid
+    JOIN pg_class v ON v.oid = r.ev_class
+    JOIN pg_class t ON t.oid = d.refobjid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE d.classid = 'pg_rewrite'::regclass
+      AND v.relkind IN ('v', 'm')
+      AND n.nspname = 'public'
+      AND (t.relname = 'analytics' OR t.relname LIKE 'analytics\\_%')
+      AND v.relname NOT LIKE 'analytics%'
+    ORDER BY 1;") || return 0
+  [ -n "$views" ] || return 0
+  echo "⚠️  Warning: these views read excluded analytics tables. They will not"
+  echo "   restore until analytics is rebuilt on the target instance:"
+  echo "$views" | sed 's/^/     /'
+}
+warn_views_on_analytics
+
 # Dump database and compress
-docker exec "$DB_CONTAINER" pg_dump -U dhis -d dhis2 | gzip > "$BACKUP_FILE"
+docker exec "$DB_CONTAINER" pg_dump -U dhis -d dhis2 "${PG_DUMP_EXCLUDES[@]}" | gzip > "$BACKUP_FILE"
 
 echo "✅ Backup created: $BACKUP_FILE"
 echo ""

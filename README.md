@@ -137,6 +137,13 @@ d2-db-backup -l pre-upgrade myinstance
 # optional label folded into the name: myinstance_<timestamp>_vXX_pre-upgrade.sql.gz
 ```
 
+Backups exclude the analytics tables (`analytics` and `analytics_*`, which
+also covers the `analytics_rs_*` resource tables). They hold derived data and
+often dominate the database size; DHIS2 rebuilds them on the next analytics
+run. A restored instance therefore has no analytics until you run analytics on
+it. If any SQL view reads an analytics table, `d2-db-backup` warns and names
+the view — that view is not usable after a restore until analytics is rebuilt.
+
 Restore:
 
 ```bash
