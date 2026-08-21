@@ -55,9 +55,17 @@ All scripts are in `bash-scripts-docker/` and expect:
    symlinks the scripts into `/usr/local/bin`:
 
 ```bash
-   ./setup.sh install   # first time
-   ./setup.sh update    # after pulling changes (never overwrites customised templates)
+   ./setup.sh install         # first time
+   ./setup.sh update          # after pulling changes
+   ./setup.sh sync-templates  # overwrite installed templates with the repo versions
 ```
+
+`update` never overwrites an installed template, since it may carry local
+customisations. It reports which ones differ from the repo instead — run
+`sync-templates` to overwrite them. The scripts read
+`$DHIS2_BASE/_templates/`, not the repo, so a template edit does nothing until
+it is synced. Existing instances keep the compose file they were created with;
+only newly created instances read the templates.
 
 ---
 
