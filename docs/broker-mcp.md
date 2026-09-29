@@ -31,7 +31,7 @@ for the launchd agent). Then add to `claude_desktop_config.json`
   "mcpServers": {
     "dhis2-instances": {
       "command": "python3",
-      "args": ["/Users/olavpo/Repos/dhis2-docker-tools/bash-scripts-docker/d2-broker-mcp"],
+      "args": ["/Users/olavpo/Repos/Mac/dhis2-docker-tools/bash-scripts-docker/d2-broker-mcp"],
       "env": { "DHIS2_BASE": "/Users/olavpo/dhis2" }
     }
   }
