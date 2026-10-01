@@ -30,20 +30,27 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
   DHIS2 that initializes itself on first start. You cannot restore real
   backups, host files, or URLs — don't ask the broker to; it will refuse.
   Each seed element carries a `dhis2_version` hint (from its filename) — use
-  it to plan version matrices. Note the **Laos HMIS demo seed exists only as
-  v41**: it boots fine on a 2.42/2.43 instance, but Flyway migrates it on
-  first boot, which takes **10–25 minutes** with nothing answering on `/api`.
-  **Seeds are snapshots and age at different rates** — the SL v40 seed's
-  tracker data ends Aug 2024 and its aggregate data lags years further, while
-  the v43 seed is current. Relative periods (`LAST_12_MONTHS` etc.) silently
-  return nothing on a stale seed: before building tests on them, check data
-  recency (e.g. `SELECT max(occurreddate) FROM event;` or the newest period in
-  a quick analytics query) and prefer fixed periods that match the data.
+  it to plan version matrices — and most carry **`notes`**: what the seed
+  is, how current its data is (`data_until`), whether its own `admin` works
+  (`admin_user`), whether analytics works (`analytics_ok`) and
+  `known_issues`. **Read the notes before you pick a seed**: they say which
+  seeds are metadata-only (useless for analytics or performance tests),
+  which ship duplicate or dangling metadata, and which cache analytics
+  answers. A seed one major older than the instance boots fine, but Flyway
+  migrates it on first boot (10–25 minutes with nothing on `/api`), so pick
+  the seed whose version matches.
+  **Seeds are snapshots and age at different rates.** Relative periods
+  (`LAST_12_MONTHS` etc.) silently return nothing on a stale seed: before
+  building tests on them, check data recency (e.g.
+  `SELECT max(occurreddate) FROM event;` or the newest period in a quick
+  analytics query) and prefer fixed periods that match the data.
 - There is a cap on concurrent `agent-*` instances — it counts **stopped
   instances too**, including stale leftovers from earlier sessions. When the
-  cap is hit, the error names deletion candidates; delete only `agent-*`
-  ones (and see the ownership caveat above — prefer the oldest `created_at`,
-  stopped, unlabelled candidates). In practice, keep the live footprint to
+  cap is hit, the error lists every candidate with its status, stopped ones
+  first; delete only `agent-*` ones (and see the ownership caveat above —
+  prefer the oldest `created_at`, stopped, unlabelled candidates). A create
+  that **fails** is deleted by the broker, so failed attempts don't use up
+  slots. In practice, keep the live footprint to
   **1 running instance where possible, 2 max**: two DHIS2 instances *booting*
   concurrently starve each other (20+ minutes with nothing on `/api`). The
   broker now guards against this — a create/reset job stays `running` until its
@@ -54,20 +61,30 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
   analytics run to ~25 minutes. The broker serializes its own jobs, but work
   you trigger through an instance's API (analytics runs, large imports/deletes)
   is invisible to it — so as a rule, run **one heavy operation across all
-  instances at a time**.
+  instances at a time**. Large *synchronous* metadata imports or deletes
+  count: a 16,000-object `importStrategy=DELETE` that hadn't answered after
+  300 s took the shared Tomcat down with it. When several agents share one
+  instance, give one of them ownership of restarts and analytics runs.
 - **Instances can be found `stopped` mid-session** (host-side resource
   management or the user intervening). A long-running dev server pointed at
   one then fails with confusing DNS/proxy errors, not a clear "upstream
   gone". If something that worked stops resolving, check `GET /instances`
   first — `start` is cheap and preserves state.
-- **`running` does not mean reachable moment-to-moment**: a host-side Tomcat
-  restart leaves the status `running` while the API refuses connections for a
-  minute or two. If a test suddenly fails with connection-refused or a
-  timeout, re-probe `/api/system/info` and re-run once it answers, before
-  treating the failure as an app bug.
+- **`running` does not mean reachable moment-to-moment**: a Tomcat restart
+  (often the JVM running out of memory under analytics load) leaves the
+  status `running` while the API refuses connections for a minute or two. If
+  a test suddenly fails with connection-refused or a timeout, check
+  `GET /instances?full=1`: `containers.tomcat.restart_count`,
+  `oom_killed` and `started_at` show whether Tomcat restarted and when.
+  A restart erases DHIS2's in-memory job notifications, so a running
+  analytics job then shows `jobStatus: RUNNING` forever with an empty task
+  list; it is dead, not slow. Re-run once the API answers, before treating
+  the failure as an app bug.
 - **Backups are admin-only**: `POST /instances/<name>/backup` returns `403`
   for your token (`_backups/` is the user's territory). To get clean or known
   state, reset from a seed or delete and re-create — don't try to back up.
+  If the user wants a dump of your instance to share or restore elsewhere,
+  see "Sharing an instance as a dump" below.
 - **Guaranteed superuser:** every instance you create or reset has a
   `local_admin` / `district` superuser (`ALL` authority), added by the host
   tooling regardless of the restored database's own `admin`. Make it your
@@ -100,13 +117,17 @@ B="$DHIS2_BROKER_URL"
 H="Authorization: Bearer $DHIS2_BROKER_TOKEN"
 CT="Content-Type: application/json"
 
-# What exists / what seeds are available
+# Identify yourself on every mutating call: the broker logs it with the job,
+# so the user can tell which session created, reset or deleted what.
+ME="X-D2-Client: $(hostname)"
+
+# What exists / what seeds are available (read the seeds' "notes")
 curl -s -H "$H" $B/instances
 curl -s -H "$H" $B/seeds
 
 # Create (always pass a label so other sessions can recognise your instances)
-curl -s -X POST -H "$H" -H "$CT" -d '{"name":"agent-mytest","version":"42","label":"<what this is for>"}' $B/instances
-curl -s -X POST -H "$H" -H "$CT" -d '{"name":"agent-mytest","version":"2.42.4","seed":"<path from /seeds>","label":"<what this is for>"}' $B/instances
+curl -s -X POST -H "$H" -H "$ME" -H "$CT" -d '{"name":"agent-mytest","version":"42","label":"<what this is for>"}' $B/instances
+curl -s -X POST -H "$H" -H "$ME" -H "$CT" -d '{"name":"agent-mytest","version":"2.42.4","seed":"<path from /seeds>","label":"<what this is for>"}' $B/instances
 
 # Readiness (full=1 adds "readiness": deploying | migrating | ready | null)
 curl -s -H "$H" "$B/instances?full=1"
@@ -116,18 +137,18 @@ curl -s -H "$H" $B/jobs/<job-id>          # status + log_tail + result
 curl -s -H "$H" $B/jobs/<job-id>/log      # full log, plain text
 
 # Reset the database to a known seed state (Tomcat restarts automatically)
-curl -s -X POST -H "$H" -H "$CT" -d '{"seed":"<path from /seeds>"}' $B/instances/agent-mytest/reset
+curl -s -X POST -H "$H" -H "$ME" -H "$CT" -d '{"seed":"<path from /seeds>"}' $B/instances/agent-mytest/reset
 
 # Start / stop / delete
-curl -s -X POST -H "$H" $B/instances/agent-mytest/start
-curl -s -X POST -H "$H" $B/instances/agent-mytest/stop
-curl -s -X DELETE -H "$H" $B/instances/agent-mytest
+curl -s -X POST -H "$H" -H "$ME" $B/instances/agent-mytest/start
+curl -s -X POST -H "$H" -H "$ME" $B/instances/agent-mytest/stop
+curl -s -X DELETE -H "$H" -H "$ME" $B/instances/agent-mytest
 
 # Upgrade in place — swap the WAR, keep the database (see note below)
-curl -s -X POST -H "$H" -H "$CT" -d '{"version":"2.42"}' $B/instances/agent-mytest/upgrade
+curl -s -X POST -H "$H" -H "$ME" -H "$CT" -d '{"version":"2.42"}' $B/instances/agent-mytest/upgrade
 
 # Change the Tomcat heap (recreates Tomcat; DB preserved)
-curl -s -X POST -H "$H" -H "$CT" -d '{"memory":"2g"}' $B/instances/agent-mytest/memory
+curl -s -X POST -H "$H" -H "$ME" -H "$CT" -d '{"memory":"2g"}' $B/instances/agent-mytest/memory
 ```
 
 **`version` accepts:** a major (`"42"` or `"2.42"` → latest stable of that
@@ -145,6 +166,19 @@ major, resolved from releases.dhis2.org) or an exact release (`"2.42.4"`,
 `seed` without `version` is valid but rarely useful: the database is
 restored but no DHIS2 webapp is deployed to serve it.
 
+**Time zone** (`"timezone": "Africa/Lagos"` on create; default `Etc/UTC`):
+sets the server time zone for Tomcat, the JVM and Postgres. Set it to the
+deployment's zone whenever dates matter, above all for Android or other
+device testing: DHIS2 rejects enrollment and event dates it thinks are in the
+future using the *server's* date, so a UTC server and a UTC+1 device break
+every sync between local midnight and UTC midnight. Before a device session,
+compare `adb shell date` with `serverDate` in `/api/system/info`.
+
+**Dev-server CORS** is set for you: after every create and reset the broker
+adds `http://localhost:3000` and `http://localhost:8080` to the instance's
+CORS allowlist (the `[cors]` line in the job log). If your dev server runs on
+other ports, pass them on create: `"cors_origins": ["http://localhost:4000"]`.
+
 **Upgrading an instance** (`POST /instances/<name>/upgrade`): swaps the WAR
 while keeping the database and volumes, then lets Flyway migrate on boot.
 **Only reach for this when the task is specifically about an upgrade/migration
@@ -152,13 +186,11 @@ path** (e.g. "does this metadata survive a 2.41 → 2.42 upgrade"). If you just
 need an instance at version X, create one at X — don't create-then-upgrade.
 For your token: only the `version` form works (`war_url`/`war_file` are
 admin-only → 403), and only same-major or one-major-up is allowed (downgrades
-and skips → 400). **`/upgrade` cannot cross the 2.41 → 2.42 boundary**: instances created at
-≤ 2.41 run Tomcat 9, but 2.42+ needs Tomcat 10, and `/upgrade` swaps only the
-WAR, not Tomcat. The broker **refuses this crossing with a `400`** (deploying a
-2.42 WAR onto the old Tomcat 9 would 404 everywhere). To move a database across
-that boundary, **create a fresh instance at the target version with the older
-seed** and let Flyway migrate it on boot (a v41 seed on a 2.42/2.43 instance
-migrates fine, though the first boot's migration takes 10–25 min). The pre-upgrade backup (`backup_first`) is skipped
+and skips → 400). **2.41 → 2.42 works too**: instances created at ≤ 2.41 run
+Tomcat 9 and 2.42+ needs Tomcat 10, so the broker swaps the servlet container
+as part of the upgrade (same ports, heap and time zone; the database volume
+is kept) before deploying the new WAR. This is the way to carry a database
+you built yourself across that boundary — no manual dump/restore/rename. The pre-upgrade backup (`backup_first`) is skipped
 automatically for your token — it would land in admin-only `_backups/`, which
 you can't read back — so there's no safety net: if an upgrade breaks the
 instance, delete and re-create. The upgrade job holds until the instance is
@@ -209,13 +241,22 @@ one queued/running returns `409` (`already has an active job`) — wait for
 the active job first. The exception is **delete**, which you may submit at
 any time: it queues behind the active job and runs after it (handy when a
 start/create is holding for minutes and you've decided you don't need the
-instance).
+instance). **A queued delete fires later, whatever you are doing then**: a
+delete submitted by an earlier script ran in the middle of a later manual
+test on the same instance. Before reusing an instance, check `GET /jobs` for
+pending jobs on it.
 
 **When a job fails** (`status: "failed"`): the `error` field says which step
 exited non-zero; the actual cause is in the output — check `log_tail` in the
 job response first, and fetch `GET /jobs/<id>/log` for the full transcript.
 Fix and retry rather than asking the user, unless the log shows a host-side
-problem (out of disk, Docker down, no free ports).
+problem (out of disk, Docker down, no free ports). A failed create has
+already been deleted by the broker, so retry with the same name.
+
+**`interrupted`** means the broker restarted. The job's `error` says what to
+do: a job that was still queued never ran, so submit it again; a create or
+reset that was running left the instance half-done, so delete it (or reset
+it) and retry.
 
 ## Reaching the instance
 
@@ -225,7 +266,7 @@ On success the job `result` includes `devnet_url`, normally
 network):
 
 ```bash
-curl -s -u admin:district http://dhis2-agent-mytest:8080/api/system/info
+curl -s -u local_admin:district http://dhis2-agent-mytest:8080/api/system/info
 ```
 
 - **Never use `localhost_url` or any `localhost:<port>`** — those are the
@@ -265,6 +306,32 @@ con = pg8000.native.Connection(
 print(con.run("SELECT count(*) FROM datavalue"))
 ```
 
+**Do database surgery on a running instance.** `stop` removes the database
+container from dev-net too, so `dhis2-<name>-db` stops resolving. To swap a
+database underneath a running DHIS2, block reconnects first —
+`ALTER DATABASE dhis2 ALLOW_CONNECTIONS false;` plus `pg_terminate_backend`
+— because Tomcat's pool reconnects instantly; then rename, re-allow, and
+stop/start the instance.
+
+### Sharing an instance as a dump
+
+`/backup` is admin-only, so when the user wants a dump of your instance (for
+another server, a colleague, a bug report), take it yourself — and **disable
+`local_admin` in it**: the broker's superuser (`local_admin`/`district`, ALL
+authority) is in every instance's database and must not travel.
+
+```bash
+PGPASSWORD=dhis pg_dump -h dhis2-<name>-db -U dhis -d dhis2 \
+  --no-owner --no-privileges -T 'analytics*' > dump.sql
+echo "UPDATE userinfo SET disabled = true WHERE username = 'local_admin';" >> dump.sql
+gzip dump.sql
+```
+
+`-T 'analytics*'` leaves out the analytics tables (usually most of the size;
+the receiver re-runs analytics). To check the dump, restore it into a scratch
+database on the same server (`dhis` may create databases) and compare row
+counts.
+
 ### Other notes
 
 - **Default credentials** `admin` / `district` (standard DHIS2 dev default;
@@ -292,11 +359,28 @@ print(con.run("SELECT count(*) FROM datavalue"))
   curl -s -X POST -H "$H" $B/instances/agent-<name>/stop
   curl -s -X POST -H "$H" $B/instances/agent-<name>/start
   ```
+- **After a host restart or unclean stop, analytics can be empty while
+  `datavalue` is intact.** Since 2.41 analytics tables are UNLOGGED, and
+  Postgres crash recovery truncates them. Re-run analytics before diagnosing
+  data loss.
+- **Analytics answers can be cached.** Some seeds set
+  `keyCacheStrategy` (e.g. `CACHE_1_MINUTE`), and metadata changes don't
+  evict cached `/api/analytics` responses, so a before/after comparison
+  reads the old answer. Set it off first:
+  `curl -X POST -u local_admin:district "<url>/api/systemSettings/keyCacheStrategy?value=NO_CACHE"`.
+- **On a freshly seeded instance, don't trust an empty list.** On a 2.41
+  seed, `/api/organisationUnitGroups` and similar legacy list endpoints
+  returned `total: 0` until Tomcat restarted, while `/gist` and by-UID reads
+  were right. Likewise `/api/apps` and `/api/apps/menu` fill in for some
+  minutes after the API answers: a short list then is not proof an app is
+  missing — open `<url>/apps/<key>` to check. Re-check via `/gist` or after a
+  stop/start before reporting metadata or apps as absent.
 - **Startup time**: DHIS2 needs 1–5 minutes to boot after its containers are
   up (10–25 on a cross-version seed migration). The broker now folds this wait
   into the job itself — a create/reset job stays `running` until the instance's
   API answers, then goes terminal — so **a `succeeded` create/reset job already
-  means the API is up**; you usually don't need a separate readiness poll.
+  means the API is up and `local_admin` logs in**; you usually don't need a
+  separate readiness poll.
   `GET /instances?full=1` still reports `readiness`
   (`deploying`/`migrating`/`ready`) if you want to watch a boot in progress.
 - **Probe directly to start work as early as possible**: for **metadata** work
@@ -343,12 +427,14 @@ print(con.run("SELECT count(*) FROM datavalue"))
   `teiSearchOrganisationUnits` on the users you test with. On 2.42 a
   plain-JSON `PATCH /api/users/<id>` is rejected — use the JSON-Patch
   content type (`application/json-patch+json`).
-- **The CORS allowlist starts empty** on every fresh instance, so a
-  browser app served from a dev server (a different origin) fails at login
-  with a CORS error. On 2.42 this is a configuration resource, not a system
-  setting — there is no `keyCorsWhitelist` under `/api/systemSettings`. The
-  working call is `POST /api/configuration/corsAllowlist` with a bare JSON
-  array of origins (e.g. `["http://localhost:3000"]`), which returns 204.
+- **CORS**: the broker allowlists `http://localhost:3000` and
+  `http://localhost:8080` (plus any `cors_origins`) after create and reset.
+  For other origins, `POST /api/configuration/corsAllowlist` with a bare JSON
+  array of *all* wanted origins (it replaces the list; returns 204). It is a
+  configuration resource, not a system setting — there is no
+  `keyCorsWhitelist` under `/api/systemSettings`. A login from a
+  non-allowlisted origin returns an empty HTTP 200 with no session cookie,
+  not an error.
 - **Exercising job/scheduler features**: no seed ships a running job or a
   scheduler queue. Build one in seconds: create 2–3 job configurations
   (`POST /api/jobConfigurations` with e.g.
