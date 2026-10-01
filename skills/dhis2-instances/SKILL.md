@@ -442,7 +442,15 @@ counts.
   ends in 2023, `last_years: 3` in 2026 builds nothing useful; check the
   seed's `data_until` note. Omit it to build every year.
   Expect **~5–15 min on the SL seeds** (v43 on 2.43.1: ~9 min for the first
-  run, `last_years: 1` ~2.5 min), longer under contention. If the task never touches aggregate
+  run, `last_years: 1` ~2.5 min), longer under contention. Two traps when
+  you check results yourself: a run interrupted in the index phase can still
+  post "Analytics tables updated" with only some indexes built (compare
+  `SELECT tablename, count(*) FROM pg_indexes WHERE tablename LIKE 'analytics_20%' GROUP BY 1`
+  across years), and analytics *responses* are cached, so a query repeated
+  after a run can return the old answer until
+  `POST /api/maintenance/cacheClear` (`/api/maintenance/analyticsCacheClear`
+  is 404). On 2.43.1, cancel during the index phase is ignored: the run
+  finishes but is recorded `STOPPED`. If the task never touches aggregate
   data (tracker-only work), `TRUNCATE datavalue` via direct DB access
   before generating analytics — it cut runtime from 30+ min to ~5 min on
   the big seeds (`skipTableTypes` is not honored on 2.41).
@@ -481,8 +489,28 @@ counts.
   `{"name": "t1", "jobType": "ANALYTICS_TABLE", "cronExpression": "0 0 3 * * ?"}`),
   then group them into a queue with
   `POST /api/scheduler/queues/<name>` (`{"cronExpression": …, "sequence": ["<uid1>", "<uid2>"]}`).
-  Trigger a long-running job (e.g. analytics export on a seeded DB) to get
-  live task progress to test against.
+  For a job that stays `RUNNING` long enough to watch, use the built-in
+  **`TEST` job type** (present on 2.40–2.43; analytics on an empty instance
+  finishes before a UI poll and its once-off configuration vanishes within a
+  minute):
+  `POST /api/jobConfigurations {"name":"t","jobType":"TEST","cronExpression":"0 0 5 1 1 ?","jobParameters":{"stages":3,"items":20,"itemDuration":1500}}`,
+  then `POST /api/jobConfigurations/<id>/execute` gives ~90 s of `RUNNING`
+  (executing it again meanwhile → 409). Other parameters: `waitMillis`,
+  `failAtStage`, `failAtItem`, `failWithMessage`, `failWithException`,
+  `failWithPolicy`, `runStagesParallel`. Facts that bite:
+  - `TEST` writes **no** notifications to `/api/system/tasks`. For visible
+    progress use an async metadata import instead
+    (`POST /api/metadata?async=true` with a few thousand generated data
+    elements emits `Creating N DataElement object(s)` lines).
+  - `executedBy` is set only on once-off jobs (like that async import);
+    `/execute` on a scheduled configuration leaves it null, so
+    "executed by this user" permission paths can't be tested via `execute`.
+  - **2.40 has no `POST /api/jobConfigurations/<id>/cancel`** (from 2.41).
+    On 2.40 the path falls into a generic handler and answers 500 or 404,
+    so a non-404 from a bogus-uid probe does not prove the endpoint exists.
+  - Cancel on 2.41–2.43 returns 204; a `TEST` job stops at the next stage
+    boundary (~30 s) with `lastExecutedStatus: STOPPED`. A user with neither
+    `F_PERFORM_MAINTENANCE` nor a matching `executedBy` gets 403.
 - For browser/Playwright login use **Basic-auth `GET /api/me`** to get a
   session cookie; the React login page resists programmatic form fills.
   Do **not** use `POST /api/auth/login` — it doesn't exist on 2.40 and
