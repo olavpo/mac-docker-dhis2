@@ -1,0 +1,48 @@
+#!/bin/bash
+#       ____  __  ______________
+#      / __ \/ / / /  _/ ___/__ \
+#     / / / / /_/ // / \__ \__/ /
+#    / /_/ / __  // / ___/ / __/
+#   /_____/_/ /_/___//____/____/
+#
+#   Restart only an instance's Postgres container (seconds), e.g. after
+#   ALTER SYSTEM for a setting that needs a server restart. Tomcat keeps
+#   running; DHIS2's connection pool reconnects, so the first request after
+#   the restart may fail, even as a 401 (the login lookup hits a dead
+#   pooled connection).
+#
+#   Usage: d2-restart-db <instance name>
+
+set -euo pipefail
+IFS=$'\n\t'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/d2-lib.sh"
+
+if [ -z "${DHIS2_BASE:-}" ]; then
+  echo "Error: DHIS2_BASE environment variable not set"
+  exit 1
+fi
+if [ $# -ne 1 ]; then
+  echo "Usage: $0 <instance name>"
+  exit 1
+fi
+
+INSTANCE=$1
+DB_CONTAINER=$(resolve_db_container "$INSTANCE") || {
+  echo "Error: database container for $INSTANCE not found"
+  exit 1
+}
+if [ "$(docker inspect -f '{{.State.Status}}' "$DB_CONTAINER")" != "running" ]; then
+  echo "Error: $DB_CONTAINER is not running; start the instance instead"
+  exit 1
+fi
+
+echo "Restarting $DB_CONTAINER..."
+docker restart "$DB_CONTAINER" >/dev/null
+if ! wait_for_db "$DB_CONTAINER"; then
+  echo "Error: database did not come back within a minute"
+  exit 1
+fi
+"$SCRIPT_DIR/d2-dev-net-attach" "$INSTANCE" >/dev/null || true
+echo "✅ $DB_CONTAINER restarted and accepting connections"

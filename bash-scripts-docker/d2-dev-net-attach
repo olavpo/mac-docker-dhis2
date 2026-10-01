@@ -11,7 +11,9 @@
 #   via the compose template; this script is for instances created before
 #   the dev-net change, or after `docker compose down` re-created without it.
 #
-#   Aliases applied on dev-net: `dhis2-<instance>` and `<instance>`.
+#   Aliases applied on dev-net: `dhis2-<instance>` and `<instance>` for Tomcat,
+#   `dhis2-<instance>-db` for Postgres (a side-door for test debugging).
+#   Idempotent: containers already on dev-net are left alone.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -35,25 +37,30 @@ TOMCAT_CONTAINER=$(resolve_tomcat_container "$INSTANCE") || {
 # Ensure the network exists.
 docker network create dev-net >/dev/null 2>&1 || true
 
-# Skip if already attached.
-if docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' \
-     "$TOMCAT_CONTAINER" | grep -qw "dev-net"; then
+on_devnet() {
+  docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' \
+    "$1" | grep -qw "dev-net"
+}
+
+if on_devnet "$TOMCAT_CONTAINER"; then
   echo "✅ $TOMCAT_CONTAINER is already attached to dev-net."
-  echo "   Reachable at: http://dhis2-$INSTANCE:8080"
-  exit 0
+else
+  docker network connect \
+    --alias "dhis2-$INSTANCE" \
+    --alias "$INSTANCE" \
+    dev-net "$TOMCAT_CONTAINER"
+  echo "✅ $TOMCAT_CONTAINER attached to dev-net."
 fi
-
-docker network connect \
-  --alias "dhis2-$INSTANCE" \
-  --alias "$INSTANCE" \
-  dev-net "$TOMCAT_CONTAINER"
-
-echo "✅ $TOMCAT_CONTAINER attached to dev-net."
 echo "   Reachable at: http://dhis2-$INSTANCE:8080"
-echo ""
-echo "Note: this attachment lasts for the lifetime of the container. If you"
-echo "run \`docker compose down\` and re-create from an old docker-compose.yml"
-echo "(one written before the dev-net change), you'll need to re-run this"
-echo "script. To make it permanent, re-create the instance with the latest"
-echo "d2-instance-create, or hand-edit docker-compose.yml to add the dev-net"
-echo "block from the template."
+
+# The database: compose templates from 2026-10 put it on dev-net themselves;
+# older instances lose a runtime attachment on every `docker compose down`.
+if DB_CONTAINER=$(resolve_db_container "$INSTANCE"); then
+  if on_devnet "$DB_CONTAINER"; then
+    echo "✅ $DB_CONTAINER is already attached to dev-net."
+  else
+    docker network connect --alias "dhis2-$INSTANCE-db" dev-net "$DB_CONTAINER"
+    echo "✅ $DB_CONTAINER attached to dev-net."
+  fi
+  echo "   Reachable at: dhis2-$INSTANCE-db:5432"
+fi

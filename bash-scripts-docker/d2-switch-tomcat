@@ -96,9 +96,9 @@ if ! wait_for_db "$DB_CONTAINER"; then
   exit 1
 fi
 
-# compose down removed the containers, and with them the db container's
-# dev-net alias (only Tomcat's is in the template); re-attach it.
-docker network connect --alias "dhis2-$INSTANCE-db" dev-net "$DB_CONTAINER" >/dev/null 2>&1 || true
+# The template puts both containers on dev-net; this is a no-op unless the
+# installed template predates that.
+"$SCRIPT_DIR/d2-dev-net-attach" "$INSTANCE" >/dev/null || true
 
 echo "✅ $INSTANCE now runs Tomcat 10 with its database kept; deploy a 2.42+ WAR next"
 echo "   Previous compose file: $COMPOSE.tomcat9.bak"

@@ -60,6 +60,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    # On dev-net from the start, so dhis2-<name>-db resolves while a create
+    # or restore is still running (a runtime `docker network connect` only
+    # happened after the create, and was lost on every compose down).
+    networks:
+      default: {}
+      dev-net:
+        aliases:
+          - dhis2-${INSTANCE_NAME}-db
 
   tomcat:
     image: tomcat:9.0-jdk17

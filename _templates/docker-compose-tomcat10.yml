@@ -60,6 +60,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    # On dev-net from the start, so dhis2-<name>-db resolves while a create
+    # or restore is still running (a runtime `docker network connect` only
+    # happened after the create, and was lost on every compose down).
+    networks:
+      default: {}
+      dev-net:
+        aliases:
+          - dhis2-${INSTANCE_NAME}-db
 
   # Optional Apache Doris analytics backend (DHIS2 >= 42). Activated by
   # COMPOSE_PROFILES=analytics-doris in the instance .env (written by

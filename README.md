@@ -87,6 +87,8 @@ only newly created instances read the templates.
   - `d2-deploy-war` — deploy a WAR by version, URL, or local file
   - `d2-set-memory` — set the Tomcat max heap (`-Xmx`) on an instance + recreate Tomcat
   - `d2-switch-tomcat` — move an instance from Tomcat 9 to 10, keeping its database (needed for a 2.41 → 2.42 upgrade; deploy the new WAR afterwards)
+  - `d2-analytics` — run analytics table generation and wait for it to finish
+  - `d2-restart-db` — restart only an instance's Postgres container
   - `d2-info` — list instances, ports, DB version, and status
   - `d2-logtail` — `docker logs -f` for Tomcat
 
