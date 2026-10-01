@@ -130,14 +130,14 @@ class Handshake(unittest.TestCase):
 
 
 class ToolsList(unittest.TestCase):
-    def test_all_nine_tools(self):
+    def test_all_ten_tools(self):
         resp = mcp.handle_message(req("tools/list"))
         tools = resp["result"]["tools"]
         self.assertEqual(
             {t["name"] for t in tools},
             {"list_instances", "create_instance", "reset_instance",
              "start_instance", "stop_instance", "delete_instance",
-             "list_seeds", "get_job", "wait_for_job"})
+             "run_analytics", "list_seeds", "get_job", "wait_for_job"})
 
     def test_every_tool_has_description_and_object_schema(self):
         for t in mcp.handle_message(req("tools/list"))["result"]["tools"]:

@@ -400,6 +400,37 @@ def apply_cors_allowlist(name, origins, log_file):
         log.write("[cors] no allowlist endpoint found; not set\n")
 
 
+def warm_legacy_layer(name, log_file):
+    """One anonymous GET to a legacy (Struts) page after boot. On 2.41,
+    endpoints such as /api/authorities answer 500 "Struts
+    Dispatcher.getInstance() is null" until something has loaded the legacy
+    web layer once. Harmless where the page doesn't exist (404)."""
+    elem = next((i for i in list_instances() if i["name"] == name), None)
+    if not elem or not elem["http_port"]:
+        return
+    url = (f"http://localhost:{elem['http_port']}"
+           f"/dhis-web-commons/security/login.action")
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    except (urllib.error.URLError, OSError) as e:
+        code = str(e)
+    with open(log_file, "a") as log:
+        log.write(f"[warm-up] legacy web layer: {code}\n")
+
+
+def after_boot(name, cors_origins=None):
+    """post_boot callable for booting jobs: warm the legacy layer, then
+    (create/reset) the CORS allowlist."""
+    def run(log_file):
+        warm_legacy_layer(name, log_file)
+        if cors_origins:
+            apply_cors_allowlist(name, cors_origins, log_file)
+    return run
+
+
 def container_health(container):
     """Restart/OOM facts for one container from `docker inspect`, or None if
     it doesn't exist. restart_count counts restarts by the restart policy
@@ -887,8 +918,16 @@ class JobManager:
             job["started_at"] = now_iso()
             self._persist(job)
             log_file = self.log_path(job["id"])
-            try:
+            if (job["op"] == "delete"
+                    and not (dhis2_base() / job["instance"]).is_dir()):
+                # Already gone, e.g. a delete queued behind a create that
+                # failed and was cleaned up. The wanted state holds.
+                steps = []
                 with open(log_file, "w") as log:
+                    log.write(f"{job['instance']} no longer exists; nothing "
+                              f"to delete\n")
+            try:
+                with open(log_file, "a") as log:
                     job["exit_code"] = 0
                     for argv in steps:
                         log.write(f"$ {' '.join(argv)}\n")
@@ -1158,6 +1197,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.upgrade_instance(name, scope)
             if action == "memory":
                 return self.set_memory_instance(name, scope)
+            if action == "restart-db":
+                return self.restart_db(name, scope)
+            if action == "analytics":
+                return self.run_analytics(name, scope)
         raise ApiError(404, "not found")
 
     def create_instance(self, scope):
@@ -1255,23 +1298,18 @@ class Handler(BaseHTTPRequestHandler):
                 argv += [flag, str(int(val))]
         argv.append(name)
 
-        # The compose template already joins dev-net for Tomcat; the attach
-        # is an idempotent belt-and-braces so the sandbox can always resolve
-        # it. The DB container is attached too (alias dhis2-<name>-db) — a
-        # Postgres side-door for test debugging (e.g. querying analytics
-        # tables directly) that has proven essential in practice.
-        post_cmds = [
-            [str(SCRIPT_DIR / "d2-dev-net-attach"), name],
-            ["docker", "network", "connect", "--alias", f"dhis2-{name}-db",
-             "dev-net", f"{name}-db-1"],
-        ]
+        # The compose template joins dev-net for Tomcat and (since 2026-10)
+        # the DB (alias dhis2-<name>-db, a Postgres side-door for test
+        # debugging); the attach is an idempotent belt-and-braces for
+        # instances whose installed template predates that.
+        post_cmds = [[str(SCRIPT_DIR / "d2-dev-net-attach"), name]]
         write_instance_meta(name, label, timezone=timezone_name,
                             cors_origins=cors_extra)
         origins = merge_origins(DEFAULT_CORS_ORIGINS, cors_extra)
         job = self.submit(
             "create", name, pre_steps + [argv], scope,
             post_cmds=post_cmds, cleanup=cleanup,
-            post_boot=lambda log: apply_cors_allowlist(name, origins, log))
+            post_boot=after_boot(name, origins))
         return self.job_response(job)
 
     def prepare_seed(self, seed, scope):
@@ -1333,7 +1371,7 @@ class Handler(BaseHTTPRequestHandler):
             read_instance_meta(name).get("cors_origins") or [])
         job = self.submit(
             "reset", name, pre_steps + [argv], scope, cleanup=cleanup,
-            post_boot=lambda log: apply_cors_allowlist(name, origins, log))
+            post_boot=after_boot(name, origins))
         return self.job_response(job)
 
     def backup_instance(self, name, scope):
@@ -1420,7 +1458,8 @@ class Handler(BaseHTTPRequestHandler):
         if switch_tomcat:
             steps.append([str(SCRIPT_DIR / "d2-switch-tomcat"), name])
         steps.append(deploy)
-        return self.job_response(self.submit("upgrade", name, steps, scope))
+        return self.job_response(self.submit("upgrade", name, steps, scope,
+                                             post_boot=after_boot(name)))
 
     def set_memory_instance(self, name, scope):
         body = self.read_body()
@@ -1431,25 +1470,49 @@ class Handler(BaseHTTPRequestHandler):
         self.require_instance(name)
         self.check_no_active_job(name)
         argv = [str(SCRIPT_DIR / "d2-set-memory"), name, str(memory)]
-        return self.job_response(self.submit("memory", name, [argv], scope))
+        return self.job_response(self.submit("memory", name, [argv], scope,
+                                             post_boot=after_boot(name)))
+
+    def restart_db(self, name, scope):
+        """Restart only the Postgres container (seconds instead of a full
+        stop/start), e.g. after ALTER SYSTEM."""
+        self.require_instance(name)
+        self.check_no_active_job(name)
+        argv = [str(SCRIPT_DIR / "d2-restart-db"), name]
+        return self.job_response(
+            self.submit("restart-db", name, [argv], scope))
+
+    def run_analytics(self, name, scope):
+        """Analytics table generation as a broker job. Runs on the single
+        worker like every job, so it never overlaps another instance's
+        create, restore or analytics run."""
+        body = self.read_body()
+        self.require_instance(name)
+        self.check_no_active_job(name)
+        argv = [str(SCRIPT_DIR / "d2-analytics"), name]
+        last_years = body.get("last_years")
+        if last_years is not None:
+            if (isinstance(last_years, bool) or not isinstance(last_years, int)
+                    or not 1 <= last_years <= 50):
+                raise ApiError(400, "last_years must be an integer 1-50")
+            argv.append(str(last_years))
+        return self.job_response(
+            self.submit("analytics", name, [argv], scope))
 
     def start_stop(self, name, action, scope):
         self.require_instance(name)
         self.check_no_active_job(name)
         script = "d2-startup" if action == "start" else "d2-shutdown"
-        # The DB's dev-net membership comes from `docker network connect`,
-        # which does not survive `docker compose down` re-creating the
-        # container (Tomcat's does — it's in the compose template). Re-attach
-        # on every start so devnet_db keeps working across stop/start cycles.
+        # Instances created before the 2026-10 template have the DB on
+        # dev-net only through a runtime attachment, which `docker compose
+        # down` loses. Re-attach on every start (a no-op for newer ones).
         post_cmds = []
+        post_boot = None
         if action == "start":
-            post_cmds = [
-                [str(SCRIPT_DIR / "d2-dev-net-attach"), name],
-                ["docker", "network", "connect", "--alias",
-                 f"dhis2-{name}-db", "dev-net", f"{name}-db-1"],
-            ]
+            post_cmds = [[str(SCRIPT_DIR / "d2-dev-net-attach"), name]]
+            post_boot = after_boot(name)
         job = self.submit(action, name, [[str(SCRIPT_DIR / script), name]],
-                          scope, post_cmds=post_cmds)
+                          scope, post_cmds=post_cmds, post_boot=post_boot)
         return self.job_response(job)
 
     def require_instance(self, name):

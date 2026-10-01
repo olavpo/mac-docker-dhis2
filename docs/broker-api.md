@@ -64,7 +64,8 @@ an `error` message; fetch `/jobs/<id>/log` for the full output.
 ## 3. Job model
 
 Anything that changes state on disk or Docker (create, reset, start, stop,
-delete, backup, upgrade) returns **202 with a job**:
+delete, backup, upgrade, memory, restart-db, analytics) returns **202 with a
+job**:
 
 ```json
 {
@@ -273,11 +274,19 @@ Validation:
   partial ones first: `agent instance cap reached (5); stopped instances
   count too. Delete one of: agent-a (stopped), agent-b (running), …`.
 
+The compose template puts both containers on `dev-net` from the start
+(`dhis2-<name>` for Tomcat, `dhis2-<name>-db` for Postgres), so the database
+resolves while the create is still running.
+
 After the underlying create succeeds, best-effort follow-ups run (failure
 logged but not surfaced as a job failure):
-1. `d2-dev-net-attach <name>` (idempotent re-attach of tomcat).
-2. `docker network connect --alias dhis2-<name>-db dev-net <name>-db-1`
-   — Postgres side-door on `dev-net`.
+1. `d2-dev-net-attach <name>` — idempotent; only does something for
+   instances whose installed template predates the dev-net blocks.
+2. Once the API answers: one anonymous GET to a legacy page
+   (`[warm-up]` in the job log). On 2.41, `/api/authorities` and similar
+   endpoints answer 500 "Struts Dispatcher.getInstance() is null" until the
+   legacy web layer has loaded once. The same warm-up runs after reset,
+   start, upgrade and memory.
 3. Once the API answers: the CORS allowlist gets `http://localhost:3000`,
    `http://localhost:8080` and any `cors_origins`, merged with what the
    database already allowed (`[cors]` line in the job log). Without it a
@@ -324,10 +333,10 @@ its own.
 `docker compose up -d` / `docker compose down`. Body ignored. Returns
 **202 + job**.
 
-On `start`, the broker re-attaches the DB container to `dev-net` with the
-`dhis2-<name>-db` alias (Tomcat's attachment lives in the compose file
-and survives by itself; the DB's is a runtime attachment that does *not*
-survive `docker compose down`).
+On `start`, the broker runs `d2-dev-net-attach`, which re-attaches the DB
+container for instances created before the DB's dev-net block was in the
+compose template (their attachment did not survive `docker compose down`),
+then warms the legacy web layer once the API answers.
 
 ### `DELETE /instances/<name>`
 
@@ -338,7 +347,9 @@ Unlike the other mutations, a delete is accepted even while the instance
 has an active job: it queues behind it and runs once that job finishes
 (useful because start/create jobs hold for minutes waiting on boot). A
 delete is only rejected with `409` when a delete for the instance is
-already queued or running.
+already queued or running. If the instance is already gone when the delete
+runs (e.g. it was queued behind a create that failed and was cleaned up),
+the delete succeeds with a note in its log.
 
 ### `POST /instances/<name>/backup`
 
@@ -424,6 +435,33 @@ Body:
 - `result` on success is the `GET /instances` element (like `start`). The
   instance restarts as Tomcat is recreated.
 
+### `POST /instances/<name>/restart-db`
+
+Restart only the Postgres container — seconds, against minutes for a full
+stop/start — e.g. after `ALTER SYSTEM` for a setting that needs a server
+restart. Body ignored. Returns **202 + job**. Tomcat keeps running and its
+connection pool reconnects, so the first request afterwards may fail — even
+as a 401, because the login lookup hits a dead pooled connection. Not a booting job: it finishes once Postgres accepts connections.
+
+### `POST /instances/<name>/analytics`
+
+Generate DHIS2 analytics tables and wait for the run to finish. Returns
+**202 + job**.
+
+```json
+{ "last_years": 2 }   // optional; integer 1–50, counted back from today. Omit for all years
+```
+
+The job (`d2-analytics`) calls `POST /api/resourceTables/analytics` as
+`local_admin`, copies DHIS2's task notifications into the job log, and
+succeeds only when DHIS2 reports completion without an error. It fails
+rather than hanging when the notifications vanish mid-run (Tomcat
+restarted), when nothing starts within 10 minutes (typically a stale
+`RUNNING` analytics job left by an earlier restart; the log says how to
+clear it), or after ~6900 s. Like every job it runs on the single worker, so
+it never overlaps another instance's restore, boot or analytics run — and
+other jobs queue behind it.
+
 ### `GET /seeds`
 
 ```json
@@ -479,7 +517,7 @@ whose `instance` starts with `agent-`.
 ```json
 {
   "id": "j-1a2b3c4d",
-  "op": "create",                        // create | reset | start | stop | delete | backup | upgrade | memory
+  "op": "create",                        // create | reset | start | stop | delete | backup | upgrade | memory | restart-db | analytics
   "instance": "agent-test1",
   "status": "running",                   // queued | running | succeeded | failed | interrupted
   "created_at":  "2026-06-13T09:14:01+00:00",
@@ -537,6 +575,7 @@ detected from the suffix.
 | `memory` | `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`); agent heap capped by `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`) |
 | `timezone` | IANA name in the host zoneinfo, e.g. `Africa/Lagos` |
 | `cors_origins` | list of ≤ 20 `http(s)://host[:port]` origins |
+| `last_years` (analytics) | integer 1–50 |
 
 Show validation errors from the broker verbatim — they are concise and
 already user-facing.

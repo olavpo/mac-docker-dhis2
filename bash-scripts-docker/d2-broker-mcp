@@ -118,7 +118,8 @@ def tool_list_instances(args):
 
 def tool_create_instance(args):
     body = {k: args[k] for k in
-            ("name", "version", "seed", "memory", "label") if k in args}
+            ("name", "version", "seed", "memory", "label", "timezone")
+            if k in args}
     return broker_request("POST", "/instances", body)
 
 
@@ -137,6 +138,12 @@ def tool_stop_instance(args):
 
 def tool_delete_instance(args):
     return broker_request("DELETE", f"/instances/{args['name']}")
+
+
+def tool_run_analytics(args):
+    body = {"last_years": args["last_years"]} if "last_years" in args else {}
+    return broker_request("POST", f"/instances/{args['name']}/analytics",
+                          body)
 
 
 def tool_list_seeds(args):
@@ -207,6 +214,11 @@ TOOLS = [
                           "description": "Free-text label (<=100 chars) "
                           "shown in list_instances — useful to mark what "
                           "this instance is for."},
+                "timezone": {"type": "string",
+                             "description": "Server time zone, e.g. "
+                             "'Africa/Lagos' (default Etc/UTC). Match the "
+                             "deployment when dates matter, e.g. for "
+                             "device testing."},
             },
             "required": ["name"],
             "additionalProperties": False,
@@ -249,6 +261,27 @@ TOOLS = [
             "IRREVERSIBLY." + _JOB_NOTE,
         "inputSchema": {"type": "object", "properties": {"name": _NAME_ARG},
                         "required": ["name"], "additionalProperties": False},
+    },
+    {
+        "name": "run_analytics",
+        "description":
+            "Generate analytics tables on an instance and wait for DHIS2 to "
+            "report completion; the job fails if the run errors or Tomcat "
+            "dies mid-run. Heavy: it runs on the broker's single queue, so "
+            "other creates wait behind it." + _JOB_NOTE,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": _NAME_ARG,
+                "last_years": {"type": "integer", "minimum": 1,
+                               "maximum": 50,
+                               "description": "Only rebuild the last N "
+                               "years, counted back from today (omit for "
+                               "all years)."},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
     },
     {
         "name": "list_seeds",
