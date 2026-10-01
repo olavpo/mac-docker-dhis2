@@ -22,6 +22,7 @@ It is a single Python 3 file with no dependencies:
 ```bash
 d2-broker run        # foreground, for trying it out
 d2-broker install    # launchd agent: starts at login, restarts on crash
+d2-broker restart    # wait until no job is queued/running, then restart the agent
 d2-broker tokens     # print the two API tokens
 d2-broker status     # launchd + health check
 d2-broker uninstall
@@ -107,7 +108,18 @@ cap timeout the job still succeeds (a log line notes the instance may still be
 migrating).
 
 Job statuses: `queued → running → succeeded | failed`; `interrupted` marks
-jobs that were in flight when the broker was restarted.
+jobs that were in flight when the broker was restarted. A restart kills a
+running job mid-step (a create or reset is then left half-done), so restart
+with `d2-broker restart`, which waits for the queue to empty, not with
+`launchctl kickstart -k`.
+
+**Operations notes.** Broker liveness is the launchd agent
+`org.dhis2.d2-broker` (`d2-broker status`), not a port check. A stopped
+instance keeps its `<name>_db_data` volume with no container attached, so
+0-link volumes in `docker system df -v` are not necessarily orphans. Every
+submitted job is logged to `broker.log` as one `[job]` line with the token
+scope, `X-D2-Client` header and User-Agent, and stored on the job as
+`requested_by`; that is how to find out who deleted an instance.
 
 ## API
 

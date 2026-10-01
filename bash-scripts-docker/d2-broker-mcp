@@ -84,7 +84,11 @@ def broker_request(method, path, body=None):
     request = urllib.request.Request(
         url, data=data, method=method,
         headers={"Authorization": f"Bearer {resolve_token()}",
-                 "Content-Type": "application/json"})
+                 "Content-Type": "application/json",
+                 # Lets the broker log say which MCP process (and so which
+                 # client session) made a destructive call.
+                 "User-Agent": f"d2-broker-mcp pid={os.getpid()} "
+                               f"ppid={os.getppid()}"})
     try:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as resp:
             return resp.status, json.loads(resp.read() or b"{}")

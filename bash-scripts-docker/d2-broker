@@ -19,6 +19,9 @@
 #     d2-broker run         Run the server in the foreground
 #     d2-broker tokens      Create (if missing) and print the API tokens
 #     d2-broker install     Install as a launchd agent (starts at login)
+#     d2-broker restart     Wait until no job is queued or running, then
+#                           restart the launchd agent (a plain kickstart
+#                           kills running jobs mid-step)
 #     d2-broker uninstall   Remove the launchd agent
 #     d2-broker status      Show launchd + HTTP health status
 #
@@ -68,6 +71,13 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,29}$")
 VERSION_RE = re.compile(r"^[0-9][0-9.]{0,15}$")
 MEMORY_RE = re.compile(r"^[0-9]+[mMgG]$")
 SEED_SUFFIXES = (".sql", ".sql.gz", ".pgc")
+TIMEZONE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$")
+ORIGIN_RE = re.compile(r"^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$")
+
+# Origins every instance allowlists for CORS after create/reset: the
+# d2-app-scripts dev server (3000) and its --proxy port (8080). Without them
+# a dev-server login gets an empty HTTP 200 with no session cookie.
+DEFAULT_CORS_ORIGINS = ("http://localhost:3000", "http://localhost:8080")
 
 # Basic-auth header for the guaranteed local_admin/district superuser. The
 # readiness probe sends it so /api/system/info returns the `version` field:
@@ -125,10 +135,11 @@ def meta_dir():
     return d
 
 
-def write_instance_meta(name, label=None):
+def write_instance_meta(name, label=None, **extra):
     meta = {"created_at": now_iso()}
     if label:
         meta["label"] = label
+    meta.update({k: v for k, v in extra.items() if v})
     (meta_dir() / f"{name}.json").write_text(json.dumps(meta))
 
 
@@ -251,8 +262,20 @@ def list_instances():
             "analytics": instance_analytics(inst),
             "created_at": meta.get("created_at"),
             "label": meta.get("label"),
+            "timezone": meta.get("timezone"),
         })
     return instances
+
+
+def cap_error(cap, existing):
+    """Agent-cap refusal naming each instance with its status, running ones
+    last, so a caller can pick a stopped one to delete without another
+    GET /instances."""
+    order = sorted(existing, key=lambda i: (i["status"] == "running",
+                                            i["name"]))
+    names = ", ".join(f"{i['name']} ({i['status']})" for i in order)
+    return (f"agent instance cap reached ({cap}); stopped instances count "
+            f"too. Delete one of: {names}")
 
 
 def instance_readiness(inst):
@@ -271,8 +294,11 @@ def instance_readiness(inst):
     unauthenticated probe would report 'migrating' long after the API is fully
     usable (and effectively never flip to 'ready'). A 401/403 still counts as
     'ready': it means the security layer is up and rejecting — the app has
-    booted — even on an instance where local_admin was removed. Note 'ready'
-    means metadata-usable, NOT that analytics / resource tables are built.
+    booted — even on an instance where local_admin was removed. A 5xx falls
+    back to an anonymous /api/system/ping: a broken local_admin row (e.g. a
+    NULL twofa on <=2.41) makes every local_admin request 500, which must not
+    read as an endless migration. Note 'ready' means metadata-usable, NOT
+    that analytics / resource tables are built.
     """
     if inst["status"] != "running" or not inst["http_port"]:
         return None
@@ -293,9 +319,128 @@ def instance_readiness(inst):
             return "ready"
         if e.code == 404:
             return "deploying"
+        if e.code >= 500 and _ping_ok(inst["http_port"]):
+            return "ready"
         return "migrating"
     except (urllib.error.URLError, OSError):
         return "deploying"
+
+
+def _ping_ok(http_port):
+    """True iff an anonymous GET /api/system/ping answers 200 — the app is
+    serving requests, whatever is wrong with the local_admin login."""
+    url = f"http://localhost:{http_port}/api/system/ping"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def cors_origins_error(origins):
+    """Validation message for a cors_origins request field, else None."""
+    if not isinstance(origins, list) or len(origins) > 20:
+        return "cors_origins must be a list of at most 20 origins"
+    for o in origins:
+        if not isinstance(o, str) or not ORIGIN_RE.match(o):
+            return (f"cors_origins entries must look like "
+                    f"http://localhost:3000 (got {o!r})")
+    return None
+
+
+def merge_origins(current, wanted):
+    """Union of two origin lists, current order first, no duplicates."""
+    out = []
+    for o in list(current or []) + list(wanted):
+        if o not in out:
+            out.append(o)
+    return out
+
+
+def apply_cors_allowlist(name, origins, log_file):
+    """Add `origins` to the instance's CORS allowlist through the DHIS2 API
+    as local_admin, keeping whatever the database already allowed.
+    Best-effort: the result goes to the job log and never fails the job.
+    2.41+ calls it corsAllowlist; older versions corsWhitelist."""
+    elem = next((i for i in list_instances() if i["name"] == name), None)
+    with open(log_file, "a") as log:
+        if not elem or not elem["http_port"]:
+            log.write(f"[cors] {name} has no HTTP port; allowlist not set\n")
+            return
+        base = f"http://localhost:{elem['http_port']}/api/configuration/"
+        for key in ("corsAllowlist", "corsWhitelist"):
+            try:
+                req = urllib.request.Request(base + key, headers={
+                    "Accept": "application/json",
+                    "Authorization": LOCAL_ADMIN_AUTH})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    raw = r.read().decode() or "[]"
+                current = json.loads(raw)
+                if not isinstance(current, list):
+                    current = []
+                merged = merge_origins(current, origins)
+                req = urllib.request.Request(
+                    base + key, data=json.dumps(merged).encode(),
+                    method="POST", headers={
+                        "Content-Type": "application/json",
+                        "Authorization": LOCAL_ADMIN_AUTH})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    log.write(f"[cors] {key} = {merged} "
+                              f"(HTTP {r.status})\n")
+                return
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    continue
+                log.write(f"[cors] {key}: HTTP {e.code}; allowlist not "
+                          f"set\n")
+                return
+            except (urllib.error.URLError, OSError, ValueError) as e:
+                log.write(f"[cors] {key}: {e}; allowlist not set\n")
+                return
+        log.write("[cors] no allowlist endpoint found; not set\n")
+
+
+def container_health(container):
+    """Restart/OOM facts for one container from `docker inspect`, or None if
+    it doesn't exist. restart_count counts restarts by the restart policy
+    (a crashed or OOM-killed JVM), not `docker start`; started_at moving
+    forward is the other sign that the process came back."""
+    if not container:
+        return None
+    out = run_out(["docker", "inspect", "-f",
+                   "{{.RestartCount}}|{{.State.OOMKilled}}|"
+                   "{{.State.StartedAt}}|{{.State.ExitCode}}",
+                   container]).strip()
+    return parse_container_health(out)
+
+
+def instance_container_health(inst):
+    """container_health for each of an instance's containers, keyed by role
+    (tomcat, db, plus doris when that backend is on). Tries both compose
+    naming styles, like instance_version."""
+    name = inst["name"]
+    roles = ["tomcat", "db"] + (["doris"] if inst.get("analytics") else [])
+    out = {}
+    for role in roles:
+        out[role] = (container_health(f"{name}-{role}-1")
+                     or container_health(f"{name}_{role}_1"))
+    return out
+
+
+def parse_container_health(out):
+    """Parse container_health's inspect format; None if malformed."""
+    parts = out.split("|")
+    if len(parts) != 4:
+        return None
+    try:
+        return {
+            "restart_count": int(parts[0]),
+            "oom_killed": parts[1] == "true",
+            "started_at": parts[2],
+            "last_exit_code": int(parts[3]),
+        }
+    except ValueError:
+        return None
 
 
 def wait_for_boot(name, log_file):
@@ -501,7 +646,21 @@ def dump_element(path, source, root):
             st.st_mtime, timezone.utc).isoformat(timespec="seconds"),
         # Heuristic from the filename's _vNN token; None when absent.
         "dhis2_version": seed_major(path.name),
+        "notes": read_seed_notes(path),
     }
+
+
+def read_seed_notes(path):
+    """Hand-written notes for a dump, from an optional sidecar file named
+    <dump filename>.json (e.g. lao_hmis_demo_v42.sql.gz.json), returned
+    as-is. Conventional keys: description, data_until, admin_user,
+    analytics_ok, known_issues. None when absent or not a JSON object."""
+    try:
+        with open(path.with_name(path.name + ".json")) as f:
+            notes = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return notes if isinstance(notes, dict) else None
 
 
 def _scan_dump_files(root, source):
@@ -604,7 +763,14 @@ class JobManager:
                     job = json.load(fh)
                 # The broker died mid-job; the subprocess is gone with it.
                 if job.get("status") in ("queued", "running"):
+                    was = job["status"]
                     job["status"] = "interrupted"
+                    job["error"] = (
+                        "broker restarted before this job ran; submit it "
+                        "again" if was == "queued" else
+                        "broker restarted mid-job; the instance may be "
+                        "half-done (a create or reset leaves it unusable): "
+                        "delete or reset it, then retry")
                 self.jobs[job["id"]] = job
             except Exception:
                 continue
@@ -626,10 +792,13 @@ class JobManager:
                     if j["instance"] == instance
                     and j["status"] in ("queued", "running")]
 
-    def submit(self, op, instance, steps, post_cmds=None, cleanup=None):
+    def submit(self, op, instance, steps, post_cmds=None, cleanup=None,
+               requested_by=None, post_boot=None):
         """steps: list of argv to run sequentially (any failure fails the
         job). post_cmds: best-effort follow-ups. cleanup: paths removed when
         the job finishes, success or not (e.g. downloaded seed files).
+        post_boot: best-effort callable(log_file) run after a booting op's
+        boot-wait, when the DHIS2 API answers (e.g. the CORS allowlist).
 
         Raises ApiError(409) if the instance already has a queued/running
         job — checked under the same lock hold as the enqueue, so two
@@ -649,6 +818,7 @@ class JobManager:
             "exit_code": None,
             "error": None,
             "result": None,
+            "requested_by": requested_by,
         }
         with self.lock:
             active = [j for j in self.jobs.values()
@@ -662,8 +832,34 @@ class JobManager:
                                     f"({blocking[0]['op']})")
             self.jobs[job["id"]] = job
         self._persist(job)
-        self.queue.put((job, steps, post_cmds or [], cleanup or []))
+        self.queue.put((job, steps, post_cmds or [], cleanup or [],
+                        post_boot))
         return job
+
+    def _remove_failed_create(self, name, log_file):
+        """Delete what a failed create left behind (containers, volumes,
+        instance directory, broker meta). The restore log inside the
+        instance directory goes first into the job log, since deleting the
+        directory would otherwise lose it."""
+        home = dhis2_base() / name
+        try:
+            with open(log_file, "a") as log:
+                log.write(f"\n[cleanup] create failed; removing {name} so "
+                          f"it doesn't hold an instance slot\n")
+                for rlog in sorted((home / "logs").glob(
+                        "database-restore-*.log")):
+                    tail = rlog.read_text(errors="replace").splitlines()[-40:]
+                    log.write(f"[cleanup] last lines of {rlog.name}:\n")
+                    log.write("\n".join(tail) + "\n")
+                log.flush()
+                if home.is_dir():
+                    subprocess.run(
+                        [str(SCRIPT_DIR / "d2-instance-delete"), name],
+                        stdout=log, stderr=subprocess.STDOUT, timeout=300,
+                        env=os.environ)
+            (meta_dir() / f"{name}.json").unlink(missing_ok=True)
+        except Exception as e:
+            sys.stderr.write(f"{now_iso()} [cleanup] {name}: {e}\n")
 
     def get(self, job_id):
         with self.lock:
@@ -686,7 +882,7 @@ class JobManager:
 
     def _worker(self):
         while True:
-            job, steps, post_cmds, cleanup = self.queue.get()
+            job, steps, post_cmds, cleanup, post_boot = self.queue.get()
             job["status"] = "running"
             job["started_at"] = now_iso()
             self._persist(job)
@@ -723,6 +919,12 @@ class JobManager:
                         # upgrade's dhis2_major_version) reflects the migrated
                         # schema, not the pre-boot state.
                         wait_for_boot(job["instance"], log_file)
+                        if post_boot:
+                            try:
+                                post_boot(log_file)
+                            except Exception as e:
+                                with open(log_file, "a") as log:
+                                    log.write(f"[post-boot] {e}\n")
                         elem = next(
                             (i for i in list_instances()
                              if i["name"] == job["instance"]), None)
@@ -757,6 +959,10 @@ class JobManager:
                         os.remove(path)
                     except OSError:
                         pass
+            if final == "failed" and job["op"] == "create":
+                # A failed create serves nothing and can't be repaired, but
+                # its record would count against the agent cap. Tear it down.
+                self._remove_failed_create(job["instance"], log_file)
             job["finished_at"] = now_iso()
             # Status flips to a terminal value only after result/error and
             # finished_at are in place, so polling clients never see a
@@ -821,6 +1027,29 @@ class Handler(BaseHTTPRequestHandler):
                     return entry["scope"]
         raise ApiError(401, "missing or invalid bearer token")
 
+    def caller(self, scope):
+        """Who asked, as far as the broker can tell: token scope, the
+        optional X-D2-Client header (sandbox clients send their hostname),
+        and the User-Agent (d2-broker-mcp sends its pid). Logged on every
+        mutating call and stored on the job, so a destroyed instance can be
+        traced to a client."""
+        return {
+            "scope": scope,
+            "client": (self.headers.get("X-D2-Client") or "")[:100] or None,
+            "user_agent": (self.headers.get("User-Agent") or "")[:200]
+                          or None,
+        }
+
+    def submit(self, op, instance, steps, scope, **kw):
+        """JobManager.submit with the caller attached and logged."""
+        who = self.caller(scope)
+        job = self.jobs.submit(op, instance, steps, requested_by=who, **kw)
+        sys.stderr.write(
+            f"{now_iso()} [job] {job['id']} {op} {instance} "
+            f"scope={who['scope']} client={who['client'] or '-'} "
+            f"ua={who['user_agent'] or '-'}\n")
+        return job
+
     def check_name(self, name, scope):
         if not NAME_RE.match(name):
             raise ApiError(400, "instance name must match "
@@ -882,6 +1111,7 @@ class Handler(BaseHTTPRequestHandler):
                 for i in instances:
                     i["dhis2_major_version"] = instance_version(i["name"])
                     i["readiness"] = instance_readiness(i)
+                    i["containers"] = instance_container_health(i)
             return self.send_json(200, {"instances": instances})
         if parts == ["seeds"]:
             return self.send_json(200, {"seeds_dir": str(seeds_dir()),
@@ -921,7 +1151,7 @@ class Handler(BaseHTTPRequestHandler):
             if action == "reset":
                 return self.reset_instance(name, scope)
             if action in ("start", "stop"):
-                return self.start_stop(name, action)
+                return self.start_stop(name, action, scope)
             if action == "backup":
                 return self.backup_instance(name, scope)
             if action == "upgrade":
@@ -944,9 +1174,7 @@ class Handler(BaseHTTPRequestHandler):
             existing = [i for i in list_instances() if i["agent_managed"]]
             cap = int(os.environ.get("D2_BROKER_MAX_AGENT_INSTANCES", 5))
             if len(existing) >= cap:
-                raise ApiError(409,
-                               f"agent instance cap reached ({cap}); delete "
-                               f"one of: {', '.join(i['name'] for i in existing)}")
+                raise ApiError(409, cap_error(cap, existing))
 
         label = body.get("label")
         if label is not None:
@@ -954,7 +1182,21 @@ class Handler(BaseHTTPRequestHandler):
             if len(label) > 100 or any(ord(c) < 32 for c in label):
                 raise ApiError(400, "label must be <= 100 printable characters")
 
+        timezone_name = body.get("timezone")
+        if timezone_name is not None:
+            timezone_name = str(timezone_name)
+            if not (TIMEZONE_RE.match(timezone_name) and
+                    Path("/usr/share/zoneinfo", timezone_name).is_file()):
+                raise ApiError(400, "timezone must be an IANA name such as "
+                                    "Africa/Lagos")
+        cors_extra = body.get("cors_origins") or []
+        err = cors_origins_error(cors_extra)
+        if err:
+            raise ApiError(400, err)
+
         argv = [str(SCRIPT_DIR / "d2-instance-create")]
+        if timezone_name:
+            argv += ["-z", timezone_name]
         version = body.get("version")
         if version:
             if not VERSION_RE.match(str(version)):
@@ -1023,9 +1265,13 @@ class Handler(BaseHTTPRequestHandler):
             ["docker", "network", "connect", "--alias", f"dhis2-{name}-db",
              "dev-net", f"{name}-db-1"],
         ]
-        write_instance_meta(name, label)
-        job = self.jobs.submit("create", name, pre_steps + [argv],
-                               post_cmds=post_cmds, cleanup=cleanup)
+        write_instance_meta(name, label, timezone=timezone_name,
+                            cors_origins=cors_extra)
+        origins = merge_origins(DEFAULT_CORS_ORIGINS, cors_extra)
+        job = self.submit(
+            "create", name, pre_steps + [argv], scope,
+            post_cmds=post_cmds, cleanup=cleanup,
+            post_boot=lambda log: apply_cors_allowlist(name, origins, log))
         return self.job_response(job)
 
     def prepare_seed(self, seed, scope):
@@ -1081,8 +1327,13 @@ class Handler(BaseHTTPRequestHandler):
         if err:
             raise ApiError(400, err)
         argv = [str(SCRIPT_DIR / "d2-db-restore"), name, seed_path]
-        job = self.jobs.submit("reset", name, pre_steps + [argv],
-                               cleanup=cleanup)
+        # The restored database brings its own allowlist; add ours again.
+        origins = merge_origins(
+            DEFAULT_CORS_ORIGINS,
+            read_instance_meta(name).get("cors_origins") or [])
+        job = self.submit(
+            "reset", name, pre_steps + [argv], scope, cleanup=cleanup,
+            post_boot=lambda log: apply_cors_allowlist(name, origins, log))
         return self.job_response(job)
 
     def backup_instance(self, name, scope):
@@ -1099,7 +1350,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "^[a-z0-9][a-z0-9_-]{0,39}$")
             argv += ["-l", str(label)]
         argv.append(name)
-        return self.job_response(self.jobs.submit("backup", name, [argv]))
+        return self.job_response(self.submit("backup", name, [argv], scope))
 
     def upgrade_instance(self, name, scope):
         body = self.read_body()
@@ -1114,6 +1365,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "version, war_url, war_file")
 
         deploy = [str(SCRIPT_DIR / "d2-deploy-war")]
+        switch_tomcat = False
         if version:
             if not VERSION_RE.match(str(version)):
                 raise ApiError(400, "version must look like 42, 2.42 or 2.42.1")
@@ -1123,24 +1375,21 @@ class Handler(BaseHTTPRequestHandler):
             err = transition_error(cur_major, target_major)
             if err:
                 raise ApiError(400, err)
-            # In-place upgrade swaps only the WAR, never the servlet container.
-            # DHIS2 <=41 runs on Tomcat 9 (javax.servlet); >=42 needs Tomcat 10
-            # (jakarta). Deploying a 2.42 WAR onto the instance's Tomcat 9 boots
-            # to an all-404 instance with no error. Refuse the boundary crossing
-            # with actionable guidance rather than silently bricking it.
+            # DHIS2 <=41 runs on Tomcat 9 (javax.servlet); >=42 needs Tomcat
+            # 10 (jakarta), and a 2.42 WAR on Tomcat 9 boots to an all-404
+            # instance with no error. Crossing 41 -> 42 therefore swaps the
+            # servlet container first (d2-switch-tomcat keeps the database
+            # volume), then deploys the WAR. Downgrades never get here
+            # (transition_error), so the only crossing is 9 -> 10.
             need_tomcat = required_tomcat_major(target_major)
             have_tomcat = current_tomcat_major(name)
             if (need_tomcat is not None and have_tomcat is not None
                     and need_tomcat != have_tomcat):
-                raise ApiError(
-                    400,
-                    f"in-place upgrade across the Tomcat {have_tomcat} -> "
-                    f"{need_tomcat} boundary is not supported: DHIS2 "
-                    f"{target_major} needs Tomcat {need_tomcat} but this "
-                    f"instance runs Tomcat {have_tomcat}, and /upgrade swaps "
-                    f"only the WAR (the result would 404 everywhere). Instead "
-                    f"create a fresh instance at {version} with the older seed "
-                    f"and let Flyway migrate it on boot.")
+                if (have_tomcat, need_tomcat) != (9, 10):
+                    raise ApiError(
+                        400, f"cannot move this instance from Tomcat "
+                             f"{have_tomcat} to {need_tomcat}")
+                switch_tomcat = True
             deploy += ["-v", str(version)]
         elif war_url:
             if scope != "all":
@@ -1168,8 +1417,10 @@ class Handler(BaseHTTPRequestHandler):
         # (keeps the admin-only backup boundary consistent with POST /backup).
         if scope == "all" and body.get("backup_first", True):
             steps.append([str(SCRIPT_DIR / "d2-db-backup"), name])
+        if switch_tomcat:
+            steps.append([str(SCRIPT_DIR / "d2-switch-tomcat"), name])
         steps.append(deploy)
-        return self.job_response(self.jobs.submit("upgrade", name, steps))
+        return self.job_response(self.submit("upgrade", name, steps, scope))
 
     def set_memory_instance(self, name, scope):
         body = self.read_body()
@@ -1180,9 +1431,9 @@ class Handler(BaseHTTPRequestHandler):
         self.require_instance(name)
         self.check_no_active_job(name)
         argv = [str(SCRIPT_DIR / "d2-set-memory"), name, str(memory)]
-        return self.job_response(self.jobs.submit("memory", name, [argv]))
+        return self.job_response(self.submit("memory", name, [argv], scope))
 
-    def start_stop(self, name, action):
+    def start_stop(self, name, action, scope):
         self.require_instance(name)
         self.check_no_active_job(name)
         script = "d2-startup" if action == "start" else "d2-shutdown"
@@ -1197,8 +1448,8 @@ class Handler(BaseHTTPRequestHandler):
                 ["docker", "network", "connect", "--alias",
                  f"dhis2-{name}-db", "dev-net", f"{name}-db-1"],
             ]
-        job = self.jobs.submit(action, name, [[str(SCRIPT_DIR / script), name]],
-                               post_cmds=post_cmds)
+        job = self.submit(action, name, [[str(SCRIPT_DIR / script), name]],
+                          scope, post_cmds=post_cmds)
         return self.job_response(job)
 
     def require_instance(self, name):
@@ -1215,7 +1466,8 @@ class Handler(BaseHTTPRequestHandler):
             # No check_no_active_job: a delete queues behind an active job
             # (submit() still rejects a second delete).
             argv = [str(SCRIPT_DIR / "d2-instance-delete"), name]
-            return self.job_response(self.jobs.submit("delete", name, [argv]))
+            return self.job_response(
+                self.submit("delete", name, [argv], scope))
         raise ApiError(404, "not found")
 
 
@@ -1296,8 +1548,18 @@ def cmd_install():
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"],
                    capture_output=True)
-    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(path)],
-                   check=True)
+    # bootout returns before the old service is gone; bootstrapping too soon
+    # fails with "Bootstrap failed: 5: Input/output error". Retry briefly.
+    for attempt in range(10):
+        res = subprocess.run(
+            ["launchctl", "bootstrap", f"gui/{uid}", str(path)],
+            capture_output=True, text=True)
+        if res.returncode == 0:
+            break
+        time.sleep(1)
+    else:
+        sys.exit(f"launchctl bootstrap failed: "
+                 f"{(res.stderr or res.stdout).strip()}")
     print(f"Installed launchd agent {LAUNCHD_LABEL}")
     print(f"  plist: {path}")
     print(f"  log:   {log}")
@@ -1311,6 +1573,36 @@ def cmd_install():
         skill_dst.parent.mkdir(parents=True, exist_ok=True)
         skill_dst.symlink_to(skill_src)
         print(f"  skill: {skill_dst} -> {skill_src}")
+    cmd_status()
+
+
+def cmd_restart():
+    """Restart the launchd agent once the job queue is empty. Polls the
+    broker's own API with the admin token; gives up after 2 hours."""
+    tokens = load_or_create_tokens()
+    url = f"http://localhost:{broker_port()}/jobs"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {tokens['admin']['token']}"})
+    deadline = time.monotonic() + 7200
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                jobs = json.load(r)["jobs"]
+        except (urllib.error.URLError, OSError, ValueError, KeyError):
+            print("broker not answering; restarting anyway")
+            break
+        active = [j for j in jobs if j["status"] in ("queued", "running")]
+        if not active:
+            break
+        if time.monotonic() > deadline:
+            sys.exit("jobs still active after 2 hours; not restarting")
+        print("waiting for: " + ", ".join(
+            f"{j['id']} {j['op']} {j['instance']}" for j in active),
+            flush=True)
+        time.sleep(15)
+    subprocess.run(["launchctl", "kickstart", "-k",
+                    f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], check=True)
+    time.sleep(2)
     cmd_status()
 
 
@@ -1347,13 +1639,14 @@ def main():
         "run": cmd_run,
         "tokens": cmd_tokens,
         "install": cmd_install,
+        "restart": cmd_restart,
         "uninstall": cmd_uninstall,
         "status": cmd_status,
     }
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd not in commands:
         print(__doc__ or "")
-        print("usage: d2-broker <run|tokens|install|uninstall|status>")
+        print("usage: d2-broker <run|tokens|install|restart|uninstall|status>")
         sys.exit(1)
     if cmd != "uninstall":
         dhis2_base()  # fail fast if DHIS2_BASE is missing

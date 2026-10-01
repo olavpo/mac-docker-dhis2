@@ -200,6 +200,30 @@ class InstanceReadiness(unittest.TestCase):
         self.assertEqual(
             broker.instance_readiness(self._inst(port)), "migrating")
 
+    def test_500_with_ping_ok_is_ready(self):
+        # A broken local_admin row 500s system/info while the app serves.
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                ok = self.path.endswith("/api/system/ping")
+                body = b"pong" if ok else b"{}"
+                self.send_response(200 if ok else 500)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        self.assertEqual(
+            broker.instance_readiness(self._inst(srv.server_address[1])),
+            "ready")
+
     def test_connection_refused_is_deploying(self):
         import socket
         s = socket.socket()
@@ -455,3 +479,97 @@ class SubmitExclusive(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParseContainerHealth(unittest.TestCase):
+    def test_parses(self):
+        self.assertEqual(
+            broker.parse_container_health(
+                "2|true|2026-10-01T08:00:00.1Z|137"),
+            {"restart_count": 2, "oom_killed": True,
+             "started_at": "2026-10-01T08:00:00.1Z", "last_exit_code": 137})
+
+    def test_fresh_container(self):
+        h = broker.parse_container_health("0|false|2026-10-01T08:00:00Z|0")
+        self.assertEqual(h["restart_count"], 0)
+        self.assertFalse(h["oom_killed"])
+
+    def test_missing_container_is_none(self):
+        self.assertIsNone(broker.parse_container_health(""))
+
+    def test_garbage_is_none(self):
+        self.assertIsNone(broker.parse_container_health("x|y|z|w"))
+
+
+class CapError(unittest.TestCase):
+    def test_lists_status_running_last(self):
+        msg = broker.cap_error(3, [
+            {"name": "agent-b", "status": "running"},
+            {"name": "agent-a", "status": "stopped"},
+            {"name": "agent-c", "status": "partial"},
+        ])
+        self.assertIn("cap reached (3)", msg)
+        self.assertLess(msg.index("agent-a (stopped)"),
+                        msg.index("agent-b (running)"))
+        self.assertIn("agent-c (partial)", msg)
+
+
+class CorsOrigins(unittest.TestCase):
+    def test_valid(self):
+        self.assertIsNone(broker.cors_origins_error(
+            ["http://localhost:3000", "https://dev.example.org"]))
+
+    def test_empty_list_ok(self):
+        self.assertIsNone(broker.cors_origins_error([]))
+
+    def test_not_a_list(self):
+        self.assertIsNotNone(broker.cors_origins_error("http://localhost"))
+
+    def test_path_rejected(self):
+        self.assertIsNotNone(
+            broker.cors_origins_error(["http://localhost:3000/app"]))
+
+    def test_too_many(self):
+        self.assertIsNotNone(broker.cors_origins_error(
+            [f"http://localhost:{3000 + i}" for i in range(21)]))
+
+    def test_merge_keeps_order_no_dupes(self):
+        self.assertEqual(
+            broker.merge_origins(["http://a:1", "http://b:2"],
+                                 ["http://b:2", "http://c:3"]),
+            ["http://a:1", "http://b:2", "http://c:3"])
+
+    def test_merge_none_current(self):
+        self.assertEqual(broker.merge_origins(None, ["http://a:1"]),
+                         ["http://a:1"])
+
+
+class SeedNotes(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dump = Path(self.tmp.name) / "lao_hmis_demo_v42.sql.gz"
+        self.dump.write_bytes(b"x")
+
+    def test_absent_is_none(self):
+        self.assertIsNone(broker.read_seed_notes(self.dump))
+
+    def test_sidecar_returned(self):
+        Path(str(self.dump) + ".json").write_text(
+            '{"admin_user": "disabled", "known_issues": ["dup types"]}')
+        self.assertEqual(broker.read_seed_notes(self.dump),
+                         {"admin_user": "disabled",
+                          "known_issues": ["dup types"]})
+
+    def test_invalid_json_is_none(self):
+        Path(str(self.dump) + ".json").write_text("{nope")
+        self.assertIsNone(broker.read_seed_notes(self.dump))
+
+    def test_non_object_is_none(self):
+        Path(str(self.dump) + ".json").write_text("[1, 2]")
+        self.assertIsNone(broker.read_seed_notes(self.dump))
+
+    def test_dump_element_carries_notes(self):
+        Path(str(self.dump) + ".json").write_text('{"description": "d"}')
+        el = broker.dump_element(self.dump, "seeds", Path(self.tmp.name))
+        self.assertEqual(el["notes"], {"description": "d"})

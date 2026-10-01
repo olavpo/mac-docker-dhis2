@@ -71,7 +71,9 @@ delete, backup, upgrade) returns **202 with a job**:
   "job": { "id": "j-1a2b3c4d", "op": "create", "instance": "agent-test1",
            "status": "queued", "created_at": "2026-06-13T09:14:01+00:00",
            "started_at": null, "finished_at": null,
-           "exit_code": null, "error": null, "result": null },
+           "exit_code": null, "error": null, "result": null,
+           "requested_by": { "scope": "agent", "client": "sbx-tool-box",
+                             "user_agent": "curl/8.5.0" } },
   "poll": "/jobs/j-1a2b3c4d",
   "log":  "/jobs/j-1a2b3c4d/log"
 }
@@ -84,6 +86,18 @@ queued ──► running ──► succeeded
                   └──► failed
                   └──► interrupted   (broker process died mid-job)
 ```
+
+`requested_by` records who submitted the job: the token scope, the optional
+`X-D2-Client` request header (sandbox clients should send their hostname)
+and the `User-Agent` (`d2-broker-mcp` sends its pid and parent pid). The
+broker also writes one `[job]` line per submitted job to `broker.log`, so a
+deleted instance can be traced to a client.
+
+An `interrupted` job carries an `error` that says what to do: a job that was
+still queued never ran and can simply be submitted again; a job that was
+running may have left the instance half-done (delete or reset it). Restart
+the broker with `d2-broker restart`, which waits for the queue to empty,
+rather than a bare `launchctl kickstart`.
 
 Terminal statuses: `succeeded`, `failed`, `interrupted`. Once `status`
 flips to terminal, `finished_at`, `exit_code`, `error`, and (on success)
@@ -140,9 +154,10 @@ Unauthenticated liveness probe. Returns `200`:
 
 List instances. Agent scope returns only `agent-*` instances. The optional
 `full=1` adds `dhis2_major_version` (queries `flyway_schema_history` on
-each running DB) and `readiness` (probes `/api/system/info` on each running
-instance) — slow if you have many instances; omit for the dashboard
-list view, fetch per-instance on demand.
+each running DB), `readiness` (probes `/api/system/info` on each running
+instance) and `containers` (restart and OOM facts from `docker inspect`) —
+slow if you have many instances; omit for the dashboard list view, fetch
+per-instance on demand.
 
 ```json
 {
@@ -159,8 +174,15 @@ list view, fetch per-instance on demand.
       "analytics": null,                 // "doris" if created with an analytics backend
       "created_at": "2026-07-16T08:12:44+00:00",
       "label": "PI-mapper review",       // free text from create; null if none
+      "timezone": "Africa/Lagos",        // from create; null = Etc/UTC or predates the field
       "dhis2_major_version": "42",       // only when full=1
-      "readiness": "ready"               // only when full=1
+      "readiness": "ready",              // only when full=1
+      "containers": {                    // only when full=1; null for a missing container
+        "tomcat": { "restart_count": 0, "oom_killed": false,
+                    "started_at": "2026-10-01T08:16:07.38Z", "last_exit_code": 0 },
+        "db":     { "restart_count": 0, "oom_killed": false,
+                    "started_at": "2026-10-01T08:15:20.12Z", "last_exit_code": 0 }
+      }
     }
   ]
 }
@@ -181,8 +203,10 @@ Field semantics:
 | `analytics` | string \| null | `"doris"` if the instance was created with a dedicated analytics database, else `null`. Read from the instance `.env`, so it is accurate for stopped instances too. |
 | `created_at` | string \| null | UTC ISO timestamp of the create request. `null` for instances predating this field (no meta file). |
 | `label` | string \| null | Free-text label passed on create — lets concurrent sessions recognise their own instances. |
+| `timezone` | string \| null | IANA time zone passed on create. `null` means the default, `Etc/UTC`. |
 | `dhis2_major_version` | string \| null | e.g. `"42"`. Present only when `full=1`. |
-| `readiness` | enum \| null | Present only when `full=1`. `deploying` (no HTTP answer on `/api` yet) / `migrating` (HTTP answers, no version yet — Flyway/context startup) / `ready` (`/api/system/info` 200 with a version, or 401/403) / `null` (not running or no published port). Best-effort probe with a 3 s timeout, authenticated as the built-in `local_admin` superuser. **`ready` means metadata-usable, not that analytics/resource tables are built** — don't trigger analytics off this signal. If you need the earliest possible "usable" moment, probe the instance's API directly (an authenticated `/api/system/info` or a real metadata query answers before some of the boot settles). |
+| `readiness` | enum \| null | Present only when `full=1`. `deploying` (no HTTP answer on `/api` yet) / `migrating` (HTTP answers, no version yet — Flyway/context startup) / `ready` (`/api/system/info` 200 with a version, or 401/403) / `null` (not running or no published port). Best-effort probe with a 3 s timeout, authenticated as the built-in `local_admin` superuser; if that answers 5xx, an anonymous `/api/system/ping` returning 200 also counts as `ready` (a broken `local_admin` row must not look like an endless migration). **`ready` means metadata-usable, not that analytics/resource tables are built** — don't trigger analytics off this signal. If you need the earliest possible "usable" moment, probe the instance's API directly (an authenticated `/api/system/info` or a real metadata query answers before some of the boot settles). |
+| `containers` | object | Present only when `full=1`. Per role (`tomcat`, `db`, plus `doris` when enabled): `restart_count` (restarts by the `restart: always` policy, i.e. a crashed or OOM-killed process; `docker start` does not count), `oom_killed`, `started_at` (moves forward when the process came back) and `last_exit_code`. A Tomcat restart wipes DHIS2's in-memory job notifications, so a running analytics job then looks stuck; check here first. |
 
 ### `POST /instances`
 
@@ -202,6 +226,8 @@ Body:
   "war_url":  "https://...",     // optional; admin only
   "war_file": "/abs/path.war",   // optional; admin only
   "analytics": "doris",          // optional; dedicated analytics DB, requires version >= 42
+  "timezone": "Africa/Lagos",    // optional; server time zone, default Etc/UTC
+  "cors_origins": ["http://localhost:4000"],  // optional; added to the CORS allowlist
   "label": "PI-mapper review"    // optional; free text (<= 100 chars), echoed in GET /instances
 }
 ```
@@ -227,6 +253,13 @@ Validation:
   The instance gets a per-instance Apache Doris container (~5.5 GB RAM).
 - `label` is free text, at most 100 printable characters (→ `400` otherwise).
   Stored broker-side (`_broker/meta/`) with the creation timestamp.
+- `timezone` is an IANA name present in the host's zoneinfo, e.g.
+  `Africa/Lagos` (→ `400` otherwise). It sets `TZ` for Tomcat and Postgres and
+  `-Duser.timezone` for the JVM. DHIS2's "cannot be a future date" checks use
+  the server's date, so an instance standing in for a UTC+1 deployment
+  should run on UTC+1, or device syncs fail after local midnight.
+- `cors_origins` is a list of at most 20 origins like
+  `http://localhost:3000` (scheme, host, optional port; → `400` otherwise).
 - Agent scope:
   - `war_url` / `war_file` → `403`.
   - `seed` may only be a relative path inside `$DHIS2_BASE/_seeds/`.
@@ -236,12 +269,27 @@ Validation:
     instances; cap exceeded → `409`.
 - An existing instance directory (`$DHIS2_BASE/<name>/`) or running
   container with the same name → `409`.
+- The cap error lists every `agent-*` instance with its status, stopped and
+  partial ones first: `agent instance cap reached (5); stopped instances
+  count too. Delete one of: agent-a (stopped), agent-b (running), …`.
 
-After the underlying create succeeds, two best-effort follow-ups run
-(failure logged but not surfaced as a job failure):
+After the underlying create succeeds, best-effort follow-ups run (failure
+logged but not surfaced as a job failure):
 1. `d2-dev-net-attach <name>` (idempotent re-attach of tomcat).
 2. `docker network connect --alias dhis2-<name>-db dev-net <name>-db-1`
    — Postgres side-door on `dev-net`.
+3. Once the API answers: the CORS allowlist gets `http://localhost:3000`,
+   `http://localhost:8080` and any `cors_origins`, merged with what the
+   database already allowed (`[cors]` line in the job log). Without it a
+   `d2-app-scripts` dev-server login returns an empty 200 and no session.
+
+On a blank create (`version`, no `seed`) the job also confirms that
+`local_admin` can log in before it finishes.
+
+**A create that fails is cleaned up**: the broker deletes the half-made
+instance (containers, volumes, directory) so it doesn't hold a slot under
+the agent cap. The job log keeps the create output, the tail of the
+database restore log, and the delete output.
 
 ### `POST /instances/<name>/reset`
 
@@ -266,6 +314,10 @@ On restore the broker ensures a known `local_admin` / `district` superuser
 (`ALL` authority) exists regardless of the restored database's own `admin`;
 it is stripped from backups (`POST /instances/<name>/backup`), so dumps never
 contain it. The same `local_admin` is ensured on create.
+
+After a reset the broker re-applies the CORS allowlist (defaults plus the
+instance's `cors_origins` from create), since the restored database brings
+its own.
 
 ### `POST /instances/<name>/start` and `POST /instances/<name>/stop`
 
@@ -322,6 +374,13 @@ it can be offered immediately as a restore source:
 Swap the running WAR (version bump or specific WAR), preserving the DB and
 volumes. Returns **202 + job**.
 
+An upgrade from 2.41 to 2.42 also moves the instance from Tomcat 9 to Tomcat
+10 (DHIS2 2.42 needs jakarta servlets): a `d2-switch-tomcat` step
+regenerates the compose file from the Tomcat 10 template with the same
+ports, heap and time zone, keeps the database volume, and then the new WAR
+is deployed and Flyway migrates the database on boot. The previous compose
+file is kept as `docker-compose.yml.tomcat9.bak`.
+
 Body (exactly one of `version` / `war_url` / `war_file` required):
 
 ```json
@@ -338,9 +397,9 @@ Body (exactly one of `version` / `war_url` / `war_file` required):
 - Version transitions: downgrades and major-version skips are rejected with
   `400`; same-major and one-major-up are allowed. (Not enforced for
   `war_url`/`war_file`, whose version can't be read in advance.)
-- `tomcat` (`"9"`/`"10"`): changing the servlet container is **not yet
-  supported** — a value differing from the instance's current Tomcat (or that
-  can't be matched) → `400`.
+- `tomcat` (`"9"`/`"10"`): only accepted when it equals the instance's
+  current Tomcat (else `400`). The 9 → 10 move for 2.41 → 2.42 happens
+  automatically from `version`; leave `tomcat` out.
 - `backup_first` (default `true`) prepends a `d2-db-backup` step; its path is
   written to the job log.
 
@@ -376,18 +435,32 @@ Body:
       "source": "seeds",
       "size_bytes": 184729281,
       "modified": "2026-04-01T13:22:08+00:00",
-      "dhis2_version": 42                                  // from the _vNN filename token; null if absent
+      "dhis2_version": 42,                                 // from the _vNN filename token; null if absent
+      "notes": {                                           // from <file>.json next to the dump; null if absent
+        "description": "Sierra Leone demo database (DHIS2 2.42).",
+        "admin_user": "admin logs in but is not a superuser. Use local_admin/district.",
+        "known_issues": []
+      }
     },
     {
       "path": "backups/acdc/acdc_2026-03-03.sql.gz",      // admin only
       "source": "backups",
       "size_bytes": 928374829,
       "modified": "2026-03-03T11:00:00+00:00",
-      "dhis2_version": null
+      "dhis2_version": null,
+      "notes": null
     }
   ]
 }
 ```
+
+`notes` is a hand-written sidecar: a JSON object in a file named after the
+dump plus `.json` (e.g. `lao_hmis_demo_v42.sql.gz.json`), returned as-is.
+Conventional keys: `description`, `data_until` (how current the data is),
+`admin_user` (whether the seed's own `admin` works), `analytics_ok`,
+`known_issues` (list of strings). Read them before provisioning: they say
+which seeds are metadata-only, which have a disabled `admin`, and which
+carry known defects.
 
 Agent scope sees only `source: "seeds"` entries; admin scope additionally
 sees backups (prefixed `backups/`).
@@ -415,6 +488,7 @@ whose `instance` starts with `agent-`.
   "exit_code":   null,
   "error":       null,
   "result":      null,                   // on success: GET /instances element (create/reset/start/upgrade) or GET /seeds element (backup)
+  "requested_by": { "scope": "agent", "client": null, "user_agent": "curl/8.5.0" },
   "log_tail":    "...last 20 lines of subprocess output..."
 }
 ```
@@ -461,6 +535,8 @@ detected from the suffix.
 | `label` (backup) | `^[a-z0-9][a-z0-9_-]{0,39}$` |
 | `backup_first` | boolean, default `true` |
 | `memory` | `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`); agent heap capped by `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`) |
+| `timezone` | IANA name in the host zoneinfo, e.g. `Africa/Lagos` |
+| `cors_origins` | list of ≤ 20 `http(s)://host[:port]` origins |
 
 Show validation errors from the broker verbatim — they are concise and
 already user-facing.
