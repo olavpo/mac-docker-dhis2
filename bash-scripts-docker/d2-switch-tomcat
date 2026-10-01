@@ -1,0 +1,104 @@
+#!/bin/bash
+#       ____  __  ______________
+#      / __ \/ / / /  _/ ___/__ \
+#     / / / / /_/ // / \__ \__/ /
+#    / /_/ / __  // / ___/ / __/
+#   /_____/_/ /_/___//____/____/
+#
+#   Move an existing instance from Tomcat 9 to Tomcat 10, keeping its
+#   database volume. DHIS2 <=2.41 runs on Tomcat 9 (javax.servlet), >=2.42
+#   needs Tomcat 10 (jakarta), so an upgrade across 2.41 -> 2.42 has to swap
+#   the servlet container, not just the WAR.
+#
+#   The compose file is regenerated from the Tomcat 10 template with the
+#   instance's current ports, heap and time zone; the old one is kept as
+#   docker-compose.yml.tomcat9.bak. The old WAR is removed: deploy the new
+#   one with d2-deploy-war afterwards (the broker's /upgrade does both).
+#
+#   Usage: d2-switch-tomcat <instance name>
+
+set -euo pipefail
+IFS=$'\n\t'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/d2-lib.sh"
+
+if [ -z "${DHIS2_BASE:-}" ]; then
+  echo "Error: DHIS2_BASE environment variable not set"
+  exit 1
+fi
+
+if [ $# -ne 1 ]; then
+  echo "Usage: $0 <instance name>"
+  exit 1
+fi
+
+INSTANCE=$1
+DHIS2_HOME="$DHIS2_BASE/$INSTANCE"
+COMPOSE="$DHIS2_HOME/docker-compose.yml"
+TEMPLATE="$DHIS2_BASE/_templates/docker-compose-tomcat10.yml"
+
+if [ ! -f "$COMPOSE" ]; then
+  echo "Error: $COMPOSE not found"
+  exit 1
+fi
+if [ ! -f "$TEMPLATE" ]; then
+  echo "Error: $TEMPLATE not found — run setup.sh update"
+  exit 1
+fi
+if grep -q 'image: tomcat:10' "$COMPOSE"; then
+  echo "$INSTANCE already runs Tomcat 10; nothing to do"
+  exit 0
+fi
+if ! grep -q 'image: tomcat:9' "$COMPOSE"; then
+  echo "Error: no Tomcat 9 image line in $COMPOSE; not touching it"
+  exit 1
+fi
+
+# Carry over what the instance was created with.
+HTTP_PORT=$(grep -oE '"[0-9]+:8080"' "$COMPOSE" | head -1 | tr -d '"' | cut -d: -f1)
+PG_PORT=$(grep -oE '"[0-9]+:5432"' "$COMPOSE" | head -1 | tr -d '"' | cut -d: -f1)
+MEMORY=$(grep -oE -- '-Xmx[0-9]+[mMgG]' "$COMPOSE" | head -1 | sed 's/-Xmx//')
+TIMEZONE=$(grep -oE 'TZ: "[^"]+"' "$COMPOSE" | head -1 | sed 's/TZ: "//; s/"$//')
+MEMORY="${MEMORY:-${D2_DEFAULT_MEMORY:-4g}}"
+TIMEZONE="${TIMEZONE:-Etc/UTC}"
+if [ -z "$HTTP_PORT" ] || [ -z "$PG_PORT" ]; then
+  echo "Error: could not read the HTTP/PostgreSQL ports from $COMPOSE"
+  exit 1
+fi
+JAVA_MEM_OPTS=" -Xmx${MEMORY}"
+
+echo "Switching $INSTANCE to Tomcat 10 (HTTP $HTTP_PORT, PostgreSQL $PG_PORT, heap $MEMORY, TZ $TIMEZONE)"
+
+# Stop without -v: the db_data volume (and so the database) stays.
+cd "$DHIS2_HOME"
+docker compose down
+
+cp "$COMPOSE" "$COMPOSE.tomcat9.bak"
+sed "s/\${PG_PORT:-5432}/$PG_PORT/g; \
+     s/\${HTTP_PORT:-8080}/$HTTP_PORT/g; \
+     s/\${JAVA_MEM_OPTS}/$JAVA_MEM_OPTS/g; \
+     s/\${INSTANCE_NAME}/$INSTANCE/g; \
+     s|\${TIMEZONE}|$TIMEZONE|g" \
+  "$TEMPLATE" > "$COMPOSE"
+
+# The Tomcat 9 build of DHIS2 can't run on Tomcat 10; remove it so the
+# container comes up empty until the new WAR is deployed.
+rm -rf "$DHIS2_HOME/webapps/ROOT" "$DHIS2_HOME/webapps/ROOT.war"
+
+docker compose up -d
+DB_CONTAINER=$(resolve_db_container "$INSTANCE") || {
+  echo "Error: database container not found after the switch"
+  exit 1
+}
+if ! wait_for_db "$DB_CONTAINER"; then
+  echo "Error: database did not come back after the switch"
+  exit 1
+fi
+
+# compose down removed the containers, and with them the db container's
+# dev-net alias (only Tomcat's is in the template); re-attach it.
+docker network connect --alias "dhis2-$INSTANCE-db" dev-net "$DB_CONTAINER" >/dev/null 2>&1 || true
+
+echo "✅ $INSTANCE now runs Tomcat 10 with its database kept; deploy a 2.42+ WAR next"
+echo "   Previous compose file: $COMPOSE.tomcat9.bak"

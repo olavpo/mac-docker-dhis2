@@ -86,6 +86,7 @@ only newly created instances read the templates.
 - **Application & info**
   - `d2-deploy-war` — deploy a WAR by version, URL, or local file
   - `d2-set-memory` — set the Tomcat max heap (`-Xmx`) on an instance + recreate Tomcat
+  - `d2-switch-tomcat` — move an instance from Tomcat 9 to 10, keeping its database (needed for a 2.41 → 2.42 upgrade; deploy the new WAR afterwards)
   - `d2-info` — list instances, ports, DB version, and status
   - `d2-logtail` — `docker logs -f` for Tomcat
 
@@ -107,6 +108,8 @@ d2-instance-create -v 2.42.4 -p 9010 -g 5433 myinstance
 d2-instance-create -v 2.42 -m 6g myinstance   # 6 GB max heap (default is 4g)
 
 d2-instance-create -v 2.41 myinstance   # Tomcat auto-selected (2.41 -> Tomcat 9)
+
+d2-instance-create -v 42 -z Africa/Lagos myinstance   # server time zone (default Etc/UTC)
 
 d2-instance-create -v 42 -a doris myinstance   # with a dedicated Apache Doris
 # analytics database (DHIS2 >= 42 only; adds a ~5.5 GB Doris container —

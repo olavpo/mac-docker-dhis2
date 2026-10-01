@@ -2,6 +2,11 @@ services:
   db:
     image: ghcr.io/baosystems/postgis:16-3.5
     restart: always
+    # Docker's default 64MB /dev/shm is too small for parallel query and
+    # parallel VACUUM on large tables ("could not resize shared memory
+    # segment ... No space left on device"). It is a ceiling, not an
+    # allocation.
+    shm_size: 1g
     # DHIS2 tuning (docs.dhis2.org sysadmin guide) scaled to a ~2GB Postgres
     # budget — the 8GB Docker VM is shared with the Tomcat heap (default 4g)
     # and optionally Doris. effective_cache_size is a planner hint, not an
@@ -39,12 +44,19 @@ services:
       POSTGRES_USER: dhis
       POSTGRES_PASSWORD: dhis
       POSTGRES_DB: dhis2
+      # Server time zone (d2-instance-create -z, default Etc/UTC). initdb
+      # takes the database's default timezone setting from it.
+      TZ: "${TIMEZONE}"
     ports:
       - "${PG_PORT:-5432}:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dhis -d dhis2"]
+      # Over TCP on purpose: on a fresh volume the image's entrypoint runs
+      # a temporary init server on the unix socket only, then restarts it.
+      # A socket check passes against that temporary server, and work
+      # started then is killed by the restart.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U dhis -d dhis2"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -103,7 +115,10 @@ services:
       - "${HTTP_PORT:-8080}:8080"
     environment:
       DHIS2_HOME: /DHIS2_home
-      CATALINA_OPTS: "-Ddhis2.home=/DHIS2_home -Dlog4j2.configurationFile=/DHIS2_home/log4j2.xml${JAVA_MEM_OPTS}"
+      # DHIS2's "future date" checks use the JVM time zone, so test
+      # instances should match the deployment they stand in for.
+      TZ: "${TIMEZONE}"
+      CATALINA_OPTS: "-Ddhis2.home=/DHIS2_home -Dlog4j2.configurationFile=/DHIS2_home/log4j2.xml -Duser.timezone=${TIMEZONE}${JAVA_MEM_OPTS}"
     volumes:
       - ./DHIS2_HOME:/DHIS2_home
       - ./logs:/usr/local/tomcat/logs
