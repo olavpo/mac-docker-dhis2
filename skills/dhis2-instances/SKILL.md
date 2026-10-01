@@ -110,7 +110,9 @@ so plain `curl -d` works too — don't "fix" calls that omit the header.)
 `{"job": {...}, "poll": "/jobs/<id>", "log": "/jobs/<id>/log"}`, but
 `GET /jobs/<id>` returns the **bare job object** (same fields, no `"job"`
 wrapper, plus `log_tail`). Don't write polling code that expects the
-wrapper on both.
+wrapper on both; `d = r.get("job", r)` reads either shape. A `KeyError`
+inside a `$(...)` poll loop fails silently and ends the loop early, so a
+running job then looks finished.
 
 ```bash
 B="$DHIS2_BROKER_URL"
@@ -149,6 +151,12 @@ curl -s -X POST -H "$H" -H "$ME" -H "$CT" -d '{"version":"2.42"}' $B/instances/a
 
 # Change the Tomcat heap (recreates Tomcat; DB preserved)
 curl -s -X POST -H "$H" -H "$ME" -H "$CT" -d '{"memory":"2g"}' $B/instances/agent-mytest/memory
+
+# Generate analytics tables and wait for completion (see "Running analytics")
+curl -s -X POST -H "$H" -H "$ME" -H "$CT" -d '{"last_years":2}' $B/instances/agent-mytest/analytics
+
+# Restart only Postgres (seconds), e.g. after ALTER SYSTEM
+curl -s -X POST -H "$H" -H "$ME" $B/instances/agent-mytest/restart-db
 ```
 
 **`version` accepts:** a major (`"42"` or `"2.42"` → latest stable of that
@@ -165,6 +173,21 @@ major, resolved from releases.dhis2.org) or an exact release (`"2.42.4"`,
 
 `seed` without `version` is valid but rarely useful: the database is
 restored but no DHIS2 webapp is deployed to serve it.
+
+**Blank instances are cheap** — about 2 minutes for a blank 2.42/2.43 and
+2.5–3 minutes for an SL-seeded 2.40/2.41, so version matrices are practical.
+Two per-version steps before the first real work on a blank instance:
+- **≤ 2.42:** the first metadata import after first boot can fail with a
+  `PropertyValueException` on `DataSet.periodType` even though the payload
+  sets it. Run `POST /api/maintenance/cacheClear` once before importing
+  (no stop/start needed on 2.42.6; 2.43 is unaffected).
+- **2.43:** set the data output period types,
+  `POST /api/configuration/dataOutputPeriodTypes`, or analytics returns
+  nothing (DHIS2-20379).
+
+Name a throwaway instance what the project's scripts already expect (e.g.
+`agent-subexpr` for `BASE=http://dhis2-agent-subexpr:8080`) and they run
+unmodified.
 
 **Time zone** (`"timezone": "Africa/Lagos"` on create; default `Etc/UTC`):
 sets the server time zone for Tomcat, the JVM and Postgres. Set it to the
@@ -196,6 +219,10 @@ you can't read back — so there's no safety net: if an upgrade breaks the
 instance, delete and re-create. The upgrade job holds until the instance is
 ready before finishing, so its `result.dhis2_major_version` reflects the
 migrated schema — no separate poll needed to confirm the upgrade landed.
+Timing varies a lot: 2.41 → 2.42 on an empty database took 1.5 minutes, but
+2.42 → 2.43 on a tiny one took ~28 minutes (WAR download, unpacking,
+Flyway) where a fresh create at 2.43 took ~6. Prefer create unless the
+upgrade path is the thing under test.
 
 **Doris analytics backend** (`"analytics": "doris"` on create): adds a
 dedicated Apache Doris analytics database as a sidecar container. Only for
@@ -269,6 +296,9 @@ network):
 curl -s -u local_admin:district http://dhis2-agent-mytest:8080/api/system/info
 ```
 
+- **The host port is not stable**: a re-created instance can come back on a
+  different `http_port`. Only the dev-net name is a stable handle, so never
+  hard-code a host port in setup docs or scripts.
 - **Never use `localhost_url` or any `localhost:<port>`** — those are the
   ports the instance publishes to the *host*; from inside the sandbox,
   nothing answers on localhost. (`localhost_url` is in the API response for
@@ -395,21 +425,31 @@ counts.
   kick off analytics on that signal; an analytics run needs its resource tables
   generated first.
 - **Running analytics to completion** (needed before any `/api/analytics`
-  query returns data):
+  query returns data; broker-created instances have no analytics tables at
+  all until the first run). Use the broker job:
 
   ```bash
-  curl -s -X POST -u local_admin:district http://dhis2-<name>:8080/api/resourceTables/analytics
-  # then poll until a notification says "Analytics tables updated":
-  curl -s -u local_admin:district http://dhis2-<name>:8080/api/system/tasks/ANALYTICS_TABLE
+  curl -s -X POST -H "$H" -H "$ME" -H "$CT" -d '{"last_years":2}' $B/instances/agent-<name>/analytics
   ```
 
-  Or simpler: poll an actual `/api/analytics` query until rows appear.
-  Expect **~10–15 min on the SL seed**, longer under contention (see the
-  one-heavy-operation rule above). If the task never touches aggregate
+  It starts the run, follows DHIS2's task notifications into the job log,
+  and ends `succeeded` only when DHIS2 reports completion without error. It
+  fails, instead of hanging, if Tomcat dies mid-run or a stale `RUNNING`
+  analytics job blocks the new one (the error says how to clear it). It
+  runs on the broker's single queue, so it never overlaps another
+  instance's restore or analytics run — and other sessions' creates wait
+  behind it. `last_years` counts back from *today*: on a seed whose data
+  ends in 2023, `last_years: 3` in 2026 builds nothing useful; check the
+  seed's `data_until` note. Omit it to build every year.
+  Expect **~5–15 min on the SL seeds** (v43 on 2.43.1: ~9 min for the first
+  run, `last_years: 1` ~2.5 min), longer under contention. If the task never touches aggregate
   data (tracker-only work), `TRUNCATE datavalue` via direct DB access
   before generating analytics — it cut runtime from 30+ min to ~5 min on
   the big seeds (`skipTableTypes` is not honored on 2.41).
-- **Warm the app before API-only smoke tests**: on a freshly booted (or
+- **Warm the app before API-only smoke tests** (the broker now does this
+  after every create, reset, start, upgrade and memory change — the
+  `[warm-up]` line in the job log — so this matters mainly after a Tomcat
+  restart you didn't go through the broker for): on a freshly booted (or
   restarted) instance, some legacy endpoints can persistently 500 —
   e.g. `GET /api/authorities` returning
   `"Struts Dispatcher.getInstance() is null"` on 2.41.9 — until *something*
