@@ -81,6 +81,7 @@ VALUES ((SELECT userroleid FROM userrole WHERE uid='${LA_ROLE_UID}'), 'ALL');
 -- authentication unboxes these Booleans, and a NULL causes a 401. We do NOT set
 -- twofactortype: it has a column default ('NOT_ENABLED') on versions that have
 -- it, and omitting it keeps this INSERT working on older schemas without it.
+-- The older twofa column is set conditionally right after the INSERT.
 INSERT INTO userinfo
   (userinfoid, uid, username, password, firstname, surname,
    disabled, invitation, selfregistered, externalauth,
@@ -90,6 +91,19 @@ VALUES
    '${LA_USER_UID}', '${LA_USER}', '${LA_PW_HASH}', 'Local', 'Admin',
    false, false, false, false,
    gen_random_uuid(), now(), now(), now());
+
+-- DHIS2 <=2.41 has a boolean twofa column with no default that Hibernate maps
+-- to a primitive: a NULL makes every request as local_admin (and GET
+-- /api/users for everyone) fail with HTTP 500 PropertyAccessException.
+-- 2.42+ replaced it with twofactortype, which has a default.
+DO \$\$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'userinfo' AND column_name = 'twofa') THEN
+    UPDATE userinfo SET twofa = false WHERE username = '${LA_USER}';
+  END IF;
+END
+\$\$;
 
 -- Role membership.
 INSERT INTO userrolemembers (userroleid, userid)
