@@ -162,14 +162,20 @@ doris_init() {
         SET GLOBAL parallel_pipeline_task_num = 1;" || return 1
 }
 
-# Database readiness check
+# Database readiness check. Connects over TCP, not the unix socket: on a fresh
+# volume the postgres image's entrypoint first runs a temporary server that
+# listens on the socket only (initdb + the postgis init scripts), then shuts
+# it down and starts the real one. A socket check passes against that
+# temporary server, and a restore started then dies with "terminating
+# connection due to administrator command" (psql exit 2).
 wait_for_db() {
   local db_container="$1"
   local max_attempts=30
   local attempt=0
-  
+
   while [ $attempt -lt $max_attempts ]; do
-    if docker exec "$db_container" psql -U dhis -d dhis2 -c "SELECT 1;" >/dev/null 2>&1; then
+    if docker exec -e PGPASSWORD=dhis "$db_container" \
+         psql -h 127.0.0.1 -U dhis -d dhis2 -c "SELECT 1;" >/dev/null 2>&1; then
       return 0
     fi
     attempt=$((attempt + 1))

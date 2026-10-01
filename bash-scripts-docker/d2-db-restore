@@ -112,13 +112,23 @@ if [[ "$DUMP_FILE" == *.pgc ]]; then
 fi
 echo "Restoring database..."
 
-# Drop existing database and create a fresh one to avoid conflicts
+# Make sure the real server is up, not the image's temporary init server
+# (see wait_for_db). Callers usually waited already; this covers the rest.
+if ! wait_for_db "$DB_CONTAINER"; then
+  echo "❌ Error: database in $DB_CONTAINER is not accepting TCP connections"
+  exit 1
+fi
+
+# Drop existing database and create a fresh one to avoid conflicts.
+# stderr is kept: it is the only clue when this step fails in a broker job.
+# WITH (FORCE) terminates any remaining sessions as part of the drop, so a
+# client that reconnects between a terminate and the drop can't block it.
 echo "Dropping existing database..."
-# Connect to postgres database to terminate connections and drop database
-docker exec "$DB_CONTAINER" psql -U dhis -d postgres -c "SELECT pg_terminate_backend(pg_stat_activity.pid) FROM pg_stat_activity WHERE pg_stat_activity.datname = 'dhis2';" >/dev/null 2>&1 || true
-docker exec "$DB_CONTAINER" psql -U dhis -d postgres -c "DROP DATABASE IF EXISTS dhis2;" >/dev/null 2>&1
+docker exec "$DB_CONTAINER" psql -q -U dhis -d postgres -v ON_ERROR_STOP=1 \
+  -c "DROP DATABASE IF EXISTS dhis2 WITH (FORCE);" >/dev/null
 echo "Creating new database..."
-docker exec "$DB_CONTAINER" psql -U dhis -d postgres -c "CREATE DATABASE dhis2;" >/dev/null 2>&1
+docker exec "$DB_CONTAINER" psql -q -U dhis -d postgres -v ON_ERROR_STOP=1 \
+  -c "CREATE DATABASE dhis2;" >/dev/null
 
 # Use appropriate restore method based on file type
 # Set timeout to 8 hours (28800 seconds) for very large databases
