@@ -130,6 +130,12 @@ From a version:
 d2-deploy-war -v 2.42.4 myinstance
 ```
 
+Release WARs fetched by version are cached in `$DHIS2_BASE/_war-cache/`, so
+repeat deploys of the same version skip the download. A WAR unused for 7 days
+is pruned on the next deploy (set `D2_WAR_CACHE_DAYS` to change this). A
+major-only version (`-v 42`) resolves to the newest cached WAR when
+releases.dhis2.org is unreachable.
+
 From a local file:
 
 ```bash

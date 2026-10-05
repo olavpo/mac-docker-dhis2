@@ -110,23 +110,39 @@ elif [ -n "$VERSION" ]; then
   
   # Extract major version for URL (e.g., 42 from 2.42.2)
   MAJOR=$(echo "$FULL_VERSION" | cut -d '.' -f 2)
-  DOWNLOAD_URL="https://releases.dhis2.org/2.$MAJOR/dhis2-stable-$FULL_VERSION.war"
-  echo "Downloading from: $DOWNLOAD_URL"
-  if command -v wget >/dev/null 2>&1; then
-    wget -nv -O "$TEMP_WAR" "$DOWNLOAD_URL"
-  elif command -v curl >/dev/null 2>&1; then
-    curl -fSL --no-progress-meter -o "$TEMP_WAR" "$DOWNLOAD_URL"
+  WAR_NAME="dhis2-stable-$FULL_VERSION.war"
+  CACHE_DIR="$(war_cache_dir)"
+  CACHED_WAR="$CACHE_DIR/$WAR_NAME"
+  mkdir -p "$CACHE_DIR"
+  prune_war_cache
+
+  if [ -s "$CACHED_WAR" ]; then
+    echo "Using cached WAR: $CACHED_WAR"
   else
-    echo "Error: Neither wget nor curl found for downloading"
-    exit 1
+    DOWNLOAD_URL="https://releases.dhis2.org/2.$MAJOR/$WAR_NAME"
+    echo "Downloading from: $DOWNLOAD_URL"
+    # Download to a temp name so an interrupted download never looks cached.
+    PARTIAL="$CACHED_WAR.$$.tmp"
+    if command -v wget >/dev/null 2>&1; then
+      wget -nv -O "$PARTIAL" "$DOWNLOAD_URL" || true
+    elif command -v curl >/dev/null 2>&1; then
+      curl -fSL --no-progress-meter -o "$PARTIAL" "$DOWNLOAD_URL" || true
+    else
+      echo "Error: Neither wget nor curl found for downloading"
+      exit 1
+    fi
+
+    # Verify the download was successful
+    if [ ! -s "$PARTIAL" ]; then
+      echo "Error: WAR file download failed or file is empty"
+      rm -f "$PARTIAL"
+      docker start "$CONTAINER" >/dev/null || true
+      exit 1
+    fi
+    mv "$PARTIAL" "$CACHED_WAR"
   fi
-  
-  # Verify the download was successful
-  if [ ! -f "$TEMP_WAR" ] || [ ! -s "$TEMP_WAR" ]; then
-    echo "Error: WAR file download failed or file is empty"
-    rm -f "$TEMP_WAR"
-    exit 1
-  fi
+  touch "$CACHED_WAR"
+  cp "$CACHED_WAR" "$TEMP_WAR"
 else
   echo "Error: No WAR file or version specified"
   usage

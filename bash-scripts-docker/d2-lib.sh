@@ -68,6 +68,20 @@ port_available() {
   return 0
 }
 
+# Release WARs downloaded by version are kept here so repeat deploys skip the
+# download. Each use refreshes the file's mtime; files unused for
+# D2_WAR_CACHE_DAYS (default 7) are pruned on the next deploy.
+war_cache_dir() {
+  echo "${DHIS2_BASE}/_war-cache"
+}
+
+prune_war_cache() {
+  local days="${D2_WAR_CACHE_DAYS:-7}"
+  [ -d "$(war_cache_dir)" ] || return 0
+  find "$(war_cache_dir)" -maxdepth 1 -name '*.war' -mtime +"$days" -delete 2>/dev/null || true
+  find "$(war_cache_dir)" -maxdepth 1 -name '*.tmp' -mtime +1 -delete 2>/dev/null || true
+}
+
 # Version normalization
 normalize_version() {
   local v="$1"
@@ -81,10 +95,20 @@ normalize_version() {
   elif [[ "$v" =~ ^[0-9]+$ ]]; then
     local major="$v"
     local resolved
-    resolved=$(curl -s "https://s3-eu-west-1.amazonaws.com/releases.dhis2.org/?prefix=2.$major/" \
+    resolved=$(curl -s --max-time 20 "https://s3-eu-west-1.amazonaws.com/releases.dhis2.org/?prefix=2.$major/" \
       | grep -o "dhis2-stable-2\.$major\.[0-9.]*.war" \
       | sort -V | tail -1 \
-      | sed 's/dhis2-stable-//;s/.war//')
+      | sed 's/dhis2-stable-//;s/.war//') || true
+    if [ -z "$resolved" ]; then
+      # Offline or S3 unreachable: fall back to the newest cached WAR.
+      resolved=$(ls "$(war_cache_dir)" 2>/dev/null \
+        | grep -o "^dhis2-stable-2\.$major\.[0-9.]*.war$" \
+        | sort -V | tail -1 \
+        | sed 's/dhis2-stable-//;s/.war//') || true
+      if [ -n "$resolved" ]; then
+        echo "Warning: could not reach releases.dhis2.org; using cached $resolved" >&2
+      fi
+    fi
     if [ -z "$resolved" ]; then
       echo "Error: could not resolve version for major $major" >&2
       return 1
