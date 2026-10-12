@@ -252,7 +252,7 @@ Validation:
 - `analytics` must be `"doris"` and requires a `version` with DHIS2 major
   ≥ 42, or a `war_url`/`war_file` (→ `400` otherwise). A custom WAR's
   version is not checked; the caller vouches that it is 42 or later.
-  The instance gets a per-instance Apache Doris container (~6.5 GB RAM).
+  The instance gets a per-instance Apache Doris container (~6 GB RAM).
 - `label` is free text, at most 100 printable characters (→ `400` otherwise).
   Stored broker-side (`_broker/meta/`) with the creation timestamp.
 - `timezone` is an IANA name present in the host's zoneinfo, e.g.

@@ -1256,7 +1256,7 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 raise ApiError(400, err)
             if scope == "agent":
-                # A Doris sidecar is a ~6.5 GB tenant; one is all a
+                # A Doris sidecar is a ~6 GB tenant; one is all a
                 # laptop-sized Docker VM fits (see
                 # docs/doris/spike-findings-2026-07-14.md).
                 cap = int(os.environ.get("D2_BROKER_MAX_AGENT_DORIS", 1))
@@ -1265,7 +1265,7 @@ class Handler(BaseHTTPRequestHandler):
                 if len(doris_owned) >= cap:
                     raise ApiError(409,
                                    f"agent Doris-instance cap reached ({cap}); "
-                                   f"Doris needs ~6.5 GB RAM per instance; "
+                                   f"Doris needs ~6 GB RAM per instance; "
                                    f"delete one of: {', '.join(doris_owned)}")
             argv += ["-a", str(analytics)]
         if body.get("war_url") or body.get("war_file"):

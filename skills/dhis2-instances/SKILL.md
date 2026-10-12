@@ -231,7 +231,7 @@ for normal analytics testing, plain Postgres instances behave identically
 to users.
 
 - Requires `version` with DHIS2 major ≥ 42 (`400` otherwise).
-- A Doris sidecar needs ~6.5 GB RAM, so your token is capped at
+- A Doris sidecar needs ~6 GB RAM, so your token is capped at
   `D2_BROKER_MAX_AGENT_DORIS` (default **1**) Doris-enabled instances
   (`409` when hit), and creates are slower (Doris image + boot).
 - Instance elements have `"analytics": "doris" | null` so you can see which
