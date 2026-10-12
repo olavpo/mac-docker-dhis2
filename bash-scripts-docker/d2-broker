@@ -585,14 +585,17 @@ def instance_analytics(name):
         return None
 
 
-def analytics_request_error(analytics, version):
+def analytics_request_error(analytics, version, custom_war=False):
     """Validation message for an analytics-backend create request, else
-    None. Doris needs a resolvable DHIS2 major >= 42, which also excludes
-    war_url/war_file creates (their major is unknowable)."""
+    None. Doris needs DHIS2 major >= 42; a 'version' is checked, while a
+    war_url/war_file create (major unknowable) is left to the caller."""
     if analytics not in ANALYTICS_BACKENDS:
         return f"analytics must be one of: {', '.join(ANALYTICS_BACKENDS)}"
+    if not version and custom_war:
+        return None
     if not version:
-        return "analytics requires a 'version' with DHIS2 major >= 42"
+        return ("analytics requires a 'version' with DHIS2 major >= 42, "
+                "or war_url/war_file")
     major = extract_target_major(version)
     if major is None or major < 42:
         return (f"analytics backend '{analytics}' requires DHIS2 42 or "
@@ -1247,13 +1250,11 @@ class Handler(BaseHTTPRequestHandler):
             argv += ["-v", str(version)]
         analytics = body.get("analytics")
         if analytics:
-            err = analytics_request_error(analytics, version)
+            err = analytics_request_error(
+                analytics, version,
+                bool(body.get("war_url") or body.get("war_file")))
             if err:
                 raise ApiError(400, err)
-            if body.get("war_url") or body.get("war_file"):
-                raise ApiError(400, "analytics cannot be combined with "
-                                    "war_url/war_file (a 'version' is how "
-                                    "the 42+ requirement is checked)")
             if scope == "agent":
                 # A Doris sidecar is a ~5.5 GB tenant; one is all a
                 # laptop-sized Docker VM fits (see

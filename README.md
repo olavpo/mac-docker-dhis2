@@ -116,6 +116,10 @@ d2-instance-create -v 42 -z Africa/Lagos myinstance   # server time zone (defaul
 d2-instance-create -v 42 -a doris myinstance   # with a dedicated Apache Doris
 # analytics database (DHIS2 >= 42 only; adds a ~5.5 GB Doris container —
 # see docs/doris/spike-findings-2026-07-14.md for what runs in Doris per version)
+
+d2-instance-create -f /path/to/dhis-2.44-snapshot.war -a doris myinstance
+# Doris with a custom WAR (-f/-l): the version is not checked, so make sure
+# the WAR is DHIS2 42 or later
 ```
 
 If you omit `-p` / `-g`, ports are auto‑selected.

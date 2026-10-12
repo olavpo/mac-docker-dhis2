@@ -33,7 +33,8 @@ usage() {
   echo "  -t <version>    Tomcat 9 or 10 (usually omit: auto-selected from -v;"
   echo "                  DHIS2 <=2.41 -> 9, >=2.42 -> 10). Default 10 without -v."
   echo "  -m <size>       Java max heap, e.g. 2g (default: 4g / \$D2_DEFAULT_MEMORY)"
-  echo "  -a <backend>    Analytics database backend: doris (requires -v with DHIS2 >= 42)"
+  echo "  -a <backend>    Analytics database backend: doris (DHIS2 >= 42; checked with -v,"
+  echo "                  trusted with -f/-l)"
   echo "  -z <timezone>   Server time zone for Tomcat and Postgres, e.g. Africa/Lagos"
   echo "                  (default: Etc/UTC)"
   echo "Example: $0 -v 2.42.4 -p 9006 -g 5433 myinstance"
@@ -116,17 +117,26 @@ TOMCAT_VERSION="${TOMCAT_VERSION:-10}"
 # Validate the analytics backend request. Done here — before port
 # selection, directory creation, or docker — so error paths have no side
 # effects. Doris analytics needs DHIS2 >= 42 (which also implies Tomcat 10).
+# With -v the version is checked; with a custom WAR (-f/-l) the version is
+# unknowable, so it is the user's call, but Tomcat must still be 10.
 if [ -n "$ANALYTICS" ]; then
   if [ "$ANALYTICS" != "doris" ]; then
     echo "Error: -a must be 'doris' (got '$ANALYTICS')" >&2
     exit 1
   fi
-  if [ -z "$VERSION" ]; then
-    echo "Error: -a doris requires -v with a DHIS2 version >= 42" >&2
-    exit 1
-  fi
-  if ! [[ "$DHIS_MAJOR" =~ ^[0-9]+$ ]] || [ "$DHIS_MAJOR" -lt 42 ]; then
-    echo "Error: -a doris requires DHIS2 42 or later (got $VERSION, major $DHIS_MAJOR)" >&2
+  if [ -n "$VERSION" ]; then
+    if ! [[ "$DHIS_MAJOR" =~ ^[0-9]+$ ]] || [ "$DHIS_MAJOR" -lt 42 ]; then
+      echo "Error: -a doris requires DHIS2 42 or later (got $VERSION, major $DHIS_MAJOR)" >&2
+      exit 1
+    fi
+  elif [ -n "$WAR_FILE" ] || [ -n "$WAR_URL" ]; then
+    if [ "$TOMCAT_VERSION" != "10" ]; then
+      echo "Error: -a doris requires Tomcat 10 (DHIS2 >= 42); drop -t 9" >&2
+      exit 1
+    fi
+    echo "Note: -a doris with a custom WAR; make sure the WAR is DHIS2 42 or later"
+  else
+    echo "Error: -a doris requires -v (DHIS2 >= 42) or a custom WAR via -f/-l" >&2
     exit 1
   fi
 fi

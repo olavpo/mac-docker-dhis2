@@ -157,7 +157,7 @@ stopped), so new instances no longer collide with stopped ones.
 `analytics` (optional) requests a dedicated analytics database:
 `"analytics": "doris"` adds a per-instance Apache Doris container
 (`d2-instance-create -a doris`). Requires a `version` with DHIS2 major ≥ 42
-(else `400`); cannot be combined with `war_url`/`war_file`. Instance
+(else `400`), or a `war_url`/`war_file`, whose version the caller vouches for. Instance
 elements carry an `analytics` field (`"doris"` or `null`). A Doris sidecar
 needs ~5.5 GB RAM, so agent tokens are capped at `D2_BROKER_MAX_AGENT_DORIS`
 (default 1) Doris-enabled instances. On DHIS2 42, aggregate and completeness

@@ -308,6 +308,10 @@ class AnalyticsRequestError(unittest.TestCase):
         self.assertIn("version", broker.analytics_request_error("doris", None))
         self.assertIn("version", broker.analytics_request_error("doris", ""))
 
+    def test_custom_war_skips_version_check(self):
+        self.assertIsNone(broker.analytics_request_error("doris", None, True))
+        self.assertIn("42", broker.analytics_request_error("doris", "2.41", True))
+
     def test_major_below_42(self):
         self.assertIn("42", broker.analytics_request_error("doris", "2.41"))
         self.assertIn("42", broker.analytics_request_error("doris", "40"))

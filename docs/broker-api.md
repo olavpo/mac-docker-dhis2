@@ -226,7 +226,7 @@ Body:
   "pg_port": 5433,               // optional; host Postgres port. Auto-selected (free) if omitted
   "war_url":  "https://...",     // optional; admin only
   "war_file": "/abs/path.war",   // optional; admin only
-  "analytics": "doris",          // optional; dedicated analytics DB, requires version >= 42
+  "analytics": "doris",          // optional; dedicated analytics DB, requires version >= 42 or a custom WAR
   "timezone": "Africa/Lagos",    // optional; server time zone, default Etc/UTC
   "cors_origins": ["http://localhost:4000"],  // optional; added to the CORS allowlist
   "label": "PI-mapper review"    // optional; free text (<= 100 chars), echoed in GET /instances
@@ -250,7 +250,8 @@ Validation:
   (running or stopped). An explicit port already in use/reserved fails the job.
 - `war_url` must be `http://` or `https://`.
 - `analytics` must be `"doris"` and requires a `version` with DHIS2 major
-  ≥ 42 (→ `400` otherwise); combining it with `war_url`/`war_file` → `400`.
+  ≥ 42, or a `war_url`/`war_file` (→ `400` otherwise). A custom WAR's
+  version is not checked; the caller vouches that it is 42 or later.
   The instance gets a per-instance Apache Doris container (~5.5 GB RAM).
 - `label` is free text, at most 100 printable characters (→ `400` otherwise).
   Stored broker-side (`_broker/meta/`) with the creation timestamp.
