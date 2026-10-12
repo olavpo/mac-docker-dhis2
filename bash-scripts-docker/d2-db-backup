@@ -15,16 +15,20 @@ if [ -z "${DHIS2_BASE:-}" ]; then
 fi
 
 usage() {
-  echo "Usage: $0 [-l <label>] <instance name>"
+  echo "Usage: $0 [-c] [-l <label>] <instance name>"
   echo "Creates a timestamped database backup in the common [Backups] directory"
   echo "Analytics tables are excluded; DHIS2 rebuilds them when analytics runs"
   echo "  -l <label>   optional tag folded into the backup filename"
+  echo "  -c           custom format (.pgc) instead of gzipped SQL (.sql.gz);"
+  echo "               restores in parallel, so much faster for large databases"
   exit 1
 }
 
 LABEL=""
-while getopts "l:" opt; do
+EXT=".sql.gz"
+while getopts "cl:" opt; do
   case $opt in
+    c) EXT=".pgc" ;;
     l) LABEL=$OPTARG ;;
     *) usage ;;
   esac
@@ -73,9 +77,9 @@ if [ -n "$LABEL" ]; then
   SUFFIX="_${LABEL}"
 fi
 if [ -n "$MAJOR_VERSION" ]; then
-  BACKUP_FILE="$BACKUP_DIR/${INSTANCE}_${TIMESTAMP}_v${MAJOR_VERSION}${SUFFIX}.sql.gz"
+  BACKUP_FILE="$BACKUP_DIR/${INSTANCE}_${TIMESTAMP}_v${MAJOR_VERSION}${SUFFIX}${EXT}"
 else
-  BACKUP_FILE="$BACKUP_DIR/${INSTANCE}_${TIMESTAMP}${SUFFIX}.sql.gz"
+  BACKUP_FILE="$BACKUP_DIR/${INSTANCE}_${TIMESTAMP}${SUFFIX}${EXT}"
 fi
 
 echo "Creating backup of $INSTANCE database..."
@@ -124,8 +128,16 @@ warn_views_on_analytics() {
 }
 warn_views_on_analytics
 
-# Dump database and compress
-docker exec "$DB_CONTAINER" pg_dump -U dhis -d dhis2 "${PG_DUMP_EXCLUDES[@]}" | gzip > "$BACKUP_FILE"
+# Dump database. Custom format is compressed by pg_dump itself and lets
+# d2-db-restore run pg_restore with parallel jobs. pipefail makes a failed
+# dump fail the script; remove the partial file so it is never used as a seed.
+if [ "$EXT" = ".pgc" ]; then
+  docker exec "$DB_CONTAINER" pg_dump -U dhis -d dhis2 -Fc "${PG_DUMP_EXCLUDES[@]}" > "$BACKUP_FILE" \
+    || { rm -f "$BACKUP_FILE"; echo "Error: pg_dump failed" >&2; exit 1; }
+else
+  docker exec "$DB_CONTAINER" pg_dump -U dhis -d dhis2 "${PG_DUMP_EXCLUDES[@]}" | gzip > "$BACKUP_FILE" \
+    || { rm -f "$BACKUP_FILE"; echo "Error: pg_dump failed" >&2; exit 1; }
+fi
 
 echo "✅ Backup created: $BACKUP_FILE"
 echo ""

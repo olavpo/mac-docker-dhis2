@@ -77,7 +77,7 @@ only newly created instances read the templates.
   - `d2-startup` / `d2-shutdown` — start/stop an existing instance
 
 - **Database**
-  - `d2-db-backup` — backup DB to `$DHIS2_BASE/_backups/<instance>/...`
+  - `d2-db-backup` — backup DB to `$DHIS2_BASE/_backups/<instance>/...` (`-c` for custom format)
   - `d2-db-restore` — restore DB from `.sql`, `.sql.gz`, or `.pgc`; disables all scheduled jobs in the restored DB
   - `d2-local-admin` — ensure/remove the known `local_admin` superuser in an instance DB
   - `d2-db-version` — restore a backup into a temp instance and read `flyway_schema_history`
@@ -158,7 +158,16 @@ d2-db-backup myinstance
 
 d2-db-backup -l pre-upgrade myinstance
 # optional label folded into the name: myinstance_<timestamp>_vXX_pre-upgrade.sql.gz
+
+d2-db-backup -c myinstance
+# custom format: myinstance_<timestamp>_vXX.pgc
 ```
+
+Use `-c` for large databases and for seeds you restore often. A `.pgc` dump
+restores with parallel `pg_restore` jobs, while `.sql`/`.sql.gz` goes through
+a single `psql` session. A custom-format dump only restores with a
+`pg_restore` at least as new as the `pg_dump` that made it, so plain SQL is
+the safer choice for dumps you share outside these instances.
 
 Backups exclude the analytics tables (`analytics` and `analytics_*`, which
 also covers the `analytics_rs_*` resource tables). They hold derived data and
@@ -171,7 +180,13 @@ Restore:
 
 ```bash
 d2-db-restore myinstance $DHIS2_BASE/_backups/myinstance/myinstance_20240101-120000_v41.sql.gz
+d2-db-restore -j 8 myinstance seed_v42.pgc   # parallel jobs for .pgc
 ```
+
+For `.pgc` dumps, the number of `pg_restore` jobs is `-j`, else
+`$D2_RESTORE_JOBS`, else the CPU count that Docker sees. More jobs than the
+Docker VM has CPUs does not help, so raise the CPU allocation in Docker
+Desktop first.
 
 Every restore disables **all** scheduled jobs (`jobconfiguration.enabled = false`)
 in the restored database — analytics runs, predictors, sync jobs and built-in

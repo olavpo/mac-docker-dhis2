@@ -60,14 +60,29 @@ if [ -z "${DHIS2_BASE:-}" ]; then
 fi
 
 usage() {
-  echo "Usage: $0 <instance name> <database_dump.sql[.gz]>"
+  echo "Usage: $0 [-j <jobs>] <instance name> <database_dump.sql|.sql.gz|.pgc>"
+  echo "  -j <jobs>   parallel pg_restore jobs for .pgc dumps (default:"
+  echo "              \$D2_RESTORE_JOBS, else the CPU count Docker sees)"
   echo "Example: $0 myinstance database.sql.gz"
-  echo "Example: $0 myinstance database.sql"
+  echo "Example: $0 -j 8 myinstance database.pgc"
   exit 1
 }
 
+RESTORE_JOBS="${D2_RESTORE_JOBS:-}"
+while getopts "j:" opt; do
+  case $opt in
+    j) RESTORE_JOBS=$OPTARG ;;
+    *) usage ;;
+  esac
+done
+shift $((OPTIND-1))
+
 if [ $# -ne 2 ]; then
   usage
+fi
+if [ -n "$RESTORE_JOBS" ] && ! [[ "$RESTORE_JOBS" =~ ^[1-9][0-9]?$ ]]; then
+  echo "Error: -j / D2_RESTORE_JOBS must be a number 1-99 (got '$RESTORE_JOBS')" >&2
+  exit 1
 fi
 
 INSTANCE=$1
@@ -149,10 +164,15 @@ restore_stream_sql() {
 # broker job, stdout is the only log a sandboxed client can read.
 if [[ "$DUMP_FILE" == *.pgc ]]; then
   # Use pg_restore for PostgreSQL custom format
-  echo "Using pg_restore for PostgreSQL custom format..."
+  # Default to the CPUs the container sees: index builds dominate a DHIS2
+  # restore and each job builds one index at a time.
+  if [ -z "$RESTORE_JOBS" ]; then
+    RESTORE_JOBS=$(docker exec "$DB_CONTAINER" nproc 2>/dev/null || echo 4)
+  fi
+  echo "Using pg_restore for PostgreSQL custom format ($RESTORE_JOBS parallel jobs)..."
   echo "This may take several minutes depending on database size..."
   # Use --no-owner to avoid ownership errors when postgres role doesn't exist
-  if ! timeout_exec $RESTORE_TIMEOUT docker exec "$DB_CONTAINER" pg_restore -U dhis -d dhis2 -j 4 --no-owner /tmp/restore.pgc 2>&1 | tee -a "$RESTORE_LOG"; then
+  if ! timeout_exec $RESTORE_TIMEOUT docker exec "$DB_CONTAINER" pg_restore -U dhis -d dhis2 -j "$RESTORE_JOBS" --no-owner /tmp/restore.pgc 2>&1 | tee -a "$RESTORE_LOG"; then
     RESTORE_FAILED=1
   fi
 elif [[ "$DUMP_FILE" == *.gz ]]; then
