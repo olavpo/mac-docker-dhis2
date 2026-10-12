@@ -79,6 +79,7 @@ only newly created instances read the templates.
 - **Database**
   - `d2-db-backup` — backup DB to `$DHIS2_BASE/_backups/<instance>/...` (`-c` for custom format)
   - `d2-db-restore` — restore DB from `.sql`, `.sql.gz`, or `.pgc`; disables all scheduled jobs in the restored DB
+  - `d2-seed-to-pgc` — convert `.sql`/`.sql.gz` seeds in `$DHIS2_BASE/_seeds` to `.pgc` for faster restores (`-m` moves the originals to `_seeds-sql/`)
   - `d2-local-admin` — ensure/remove the known `local_admin` superuser in an instance DB
   - `d2-db-version` — restore a backup into a temp instance and read `flyway_schema_history`
   - `d2-psql` — open `psql` inside the DB container

@@ -1,0 +1,156 @@
+#!/bin/bash
+# Convert plain-SQL database seeds (.sql / .sql.gz) to pg_dump custom
+# format (.pgc), which d2-db-restore loads with parallel pg_restore jobs.
+#
+# Each seed is loaded into one throwaway Postgres container (the same
+# image as the instances, so pg_restore there can read the output) and
+# dumped again with pg_dump -Fc. No DHIS2 runs, so the seed content is not
+# changed: no local_admin, no disabled jobs. Originals are kept unless -m.
+
+set -euo pipefail
+IFS=$'\n\t'
+
+if [ -z "${DHIS2_BASE:-}" ]; then
+  echo "Error: DHIS2_BASE environment variable not set"
+  exit 1
+fi
+
+SEEDS_DIR="$DHIS2_BASE/_seeds"
+MOVED_DIR="$DHIS2_BASE/_seeds-sql"
+PG_IMAGE="ghcr.io/baosystems/postgis:16-3.5"
+CONTAINER="d2-seed-to-pgc"
+
+usage() {
+  echo "Usage: $0 [-f] [-m] [seed file ...]"
+  echo "Converts .sql/.sql.gz seeds to .pgc, one at a time."
+  echo "With no files, converts every .sql/.sql.gz in $SEEDS_DIR."
+  echo "  -f   overwrite an existing .pgc"
+  echo "  -m   after a verified conversion, move the original (and its"
+  echo "       .json sidecar) to $MOVED_DIR, outside the broker's seed list"
+  exit 1
+}
+
+FORCE=0
+MOVE=0
+while getopts "fmh" opt; do
+  case $opt in
+    f) FORCE=1 ;;
+    m) MOVE=1 ;;
+    *) usage ;;
+  esac
+done
+shift $((OPTIND-1))
+
+if [ $# -gt 0 ]; then
+  SEEDS=("$@")
+else
+  SEEDS=()
+  while IFS= read -r f; do SEEDS+=("$f"); done < <(
+    find "$SEEDS_DIR" -maxdepth 1 -type f \( -name '*.sql' -o -name '*.sql.gz' \) | sort)
+fi
+if [ ${#SEEDS[@]} -eq 0 ]; then
+  echo "No .sql/.sql.gz seeds found in $SEEDS_DIR"
+  exit 0
+fi
+
+# Throwaway server: durability settings are off because the data only
+# lives until the dump is written. The anonymous volume goes with --rm.
+cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+cleanup
+echo "Starting temporary Postgres ($PG_IMAGE)..."
+docker run -d --rm --name "$CONTAINER" --shm-size 1g \
+  -e POSTGRES_USER=dhis -e POSTGRES_PASSWORD=dhis -e POSTGRES_DB=postgres \
+  "$PG_IMAGE" postgres -c fsync=off -c full_page_writes=off \
+  -c synchronous_commit=off -c maintenance_work_mem=512MB \
+  -c max_wal_size=4GB -c max_locks_per_transaction=256 >/dev/null
+
+# Over TCP: the image's init phase runs a temporary server on the socket.
+for _ in $(seq 1 60); do
+  docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U dhis -d postgres >/dev/null 2>&1 && break
+  sleep 1
+done
+docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U dhis -d postgres >/dev/null \
+  || { echo "Error: temporary Postgres did not start"; exit 1; }
+
+psql_c() { docker exec "$CONTAINER" psql -h 127.0.0.1 -U dhis -tA -v ON_ERROR_STOP=1 "$@"; }
+human() { du -h "$1" | cut -f1; }
+
+FAILED=()
+CONVERTED=0
+for SEED in "${SEEDS[@]}"; do
+  case "$SEED" in
+    *.sql.gz) BASE="${SEED%.sql.gz}" ;;
+    *.sql)    BASE="${SEED%.sql}" ;;
+    *) echo "Skipping $SEED: not .sql or .sql.gz"; continue ;;
+  esac
+  OUT="$BASE.pgc"
+  NAME=$(basename "$SEED")
+  echo ""
+  echo "=== $NAME"
+  if [ -e "$OUT" ] && [ "$FORCE" -eq 0 ]; then
+    echo "    $(basename "$OUT") exists; skipping (use -f to overwrite)"
+    continue
+  fi
+
+  START=$(date +%s)
+  LOG="$BASE.pgc-convert.log"
+  psql_c -d postgres -c "DROP DATABASE IF EXISTS dhis2 WITH (FORCE);" >/dev/null 2>&1
+  psql_c -d postgres -c "CREATE DATABASE dhis2;" >/dev/null
+
+  # Load the way d2-db-restore does (psql without ON_ERROR_STOP), so the
+  # .pgc holds the same database a .sql.gz restore would have produced.
+  echo "    loading..."
+  if [[ "$SEED" == *.gz ]]; then
+    gunzip -c "$SEED" | docker exec -i "$CONTAINER" psql -q -h 127.0.0.1 -U dhis -d dhis2 >/dev/null 2>"$LOG" || true
+  else
+    docker exec -i "$CONTAINER" psql -q -h 127.0.0.1 -U dhis -d dhis2 <"$SEED" >/dev/null 2>"$LOG" || true
+  fi
+  LOAD_ERRORS=$(grep -c '^ERROR' "$LOG" || true)
+
+  echo "    dumping..."
+  PARTIAL="$OUT.partial"
+  if ! docker exec "$CONTAINER" pg_dump -h 127.0.0.1 -U dhis -d dhis2 -Fc >"$PARTIAL" 2>>"$LOG"; then
+    rm -f "$PARTIAL"
+    echo "    ❌ pg_dump failed; see $LOG"
+    FAILED+=("$NAME")
+    continue
+  fi
+
+  # Verify: the archive is readable and holds data for every table.
+  N_TABLES=$(psql_c -d dhis2 -c "SELECT count(*) FROM pg_tables WHERE schemaname='public';")
+  N_DATA=$(docker exec -i "$CONTAINER" pg_restore -l <"$PARTIAL" 2>>"$LOG" | grep -c ' TABLE DATA public ' || true)
+  if [ "$N_TABLES" -eq 0 ] || [ "$N_DATA" -ne "$N_TABLES" ]; then
+    rm -f "$PARTIAL"
+    echo "    ❌ verification failed: $N_TABLES tables, $N_DATA data entries; see $LOG"
+    FAILED+=("$NAME")
+    continue
+  fi
+  mv "$PARTIAL" "$OUT"
+  [ -f "$SEED.json" ] && cp "$SEED.json" "$OUT.json"
+
+  echo "    ✅ $(basename "$OUT"): $(human "$SEED") -> $(human "$OUT"), $N_TABLES tables, $(( $(date +%s) - START ))s"
+  if [ "$LOAD_ERRORS" -gt 0 ]; then
+    echo "    ⚠️  $LOAD_ERRORS ERROR line(s) while loading the SQL (a normal restore hits the same); see $LOG"
+  else
+    rm -f "$LOG"
+  fi
+  CONVERTED=$((CONVERTED + 1))
+
+  if [ "$MOVE" -eq 1 ]; then
+    mkdir -p "$MOVED_DIR"
+    mv "$SEED" "$MOVED_DIR/"
+    [ -f "$SEED.json" ] && mv "$SEED.json" "$MOVED_DIR/"
+    echo "    moved original to $MOVED_DIR/"
+  fi
+
+  # Free the space in the Docker VM before the next seed.
+  psql_c -d postgres -c "DROP DATABASE dhis2 WITH (FORCE);" >/dev/null
+done
+
+echo ""
+echo "Converted: $CONVERTED"
+if [ ${#FAILED[@]} -gt 0 ]; then
+  echo "Failed: ${FAILED[*]}"
+  exit 1
+fi
