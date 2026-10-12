@@ -39,7 +39,7 @@ launchd plist):
 | `D2_BROKER_MAX_AGENT_INSTANCES` | `5` | Cap on concurrent `agent-*` instances |
 | `D2_BROKER_JOB_TIMEOUT` | `7200` | Per-job timeout, seconds |
 | `D2_BROKER_BOOT_WAIT` | `1800` | Seconds a booting job holds for the instance API to become ready before finishing (serializes boot; capped) |
-| `D2_DEFAULT_MEMORY` | `3g` | Default Tomcat max heap for new instances (`d2-instance-create`); unset, Doris instances get `2g` |
+| `D2_DEFAULT_MEMORY` | `3g` | Default Tomcat max heap for new instances (`d2-instance-create`) |
 | `D2_BROKER_MAX_AGENT_MEMORY` | `8g` | Max heap an agent token may request |
 | `D2_BROKER_MAX_AGENT_DORIS` | `1` | Cap on agent-owned Doris-enabled instances (~6.5 GB RAM each) |
 

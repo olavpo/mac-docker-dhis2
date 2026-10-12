@@ -249,7 +249,7 @@ to users.
   analytics run fails with "Communications link failure" (stale JDBC pool)
   — stop/start the instance to fix.
 
-**Memory / heap**: instances default to `-Xmx3g` (`-Xmx2g` with Doris). Set a different heap at
+**Memory / heap**: instances default to `-Xmx3g`. Set a different heap at
 create with `"memory":"2g"` in the body, or change it later with
 `POST /instances/<name>/memory` `{"memory":"2g"}` (recreates Tomcat — a brief
 restart; DB preserved). Your token is capped by `D2_BROKER_MAX_AGENT_MEMORY`
