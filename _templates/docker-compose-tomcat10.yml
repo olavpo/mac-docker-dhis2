@@ -8,7 +8,7 @@ services:
     # allocation.
     shm_size: 1g
     # DHIS2 tuning (docs.dhis2.org sysadmin guide) scaled to a ~2GB Postgres
-    # budget — the 8GB Docker VM is shared with the Tomcat heap (default 4g)
+    # budget — the 8GB Docker VM is shared with the Tomcat heap (default 3g)
     # and optionally Doris. effective_cache_size is a planner hint, not an
     # allocation. No mem_limit on purpose: an OOM-killed Postgres mid-restore
     # is worse than brief memory pressure on the VM.

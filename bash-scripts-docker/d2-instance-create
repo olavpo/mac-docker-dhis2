@@ -32,7 +32,7 @@ usage() {
   echo "  -f <war_file>   Custom WAR file to deploy"
   echo "  -t <version>    Tomcat 9 or 10 (usually omit: auto-selected from -v;"
   echo "                  DHIS2 <=2.41 -> 9, >=2.42 -> 10). Default 10 without -v."
-  echo "  -m <size>       Java max heap, e.g. 2g (default: 4g / \$D2_DEFAULT_MEMORY)"
+  echo "  -m <size>       Java max heap, e.g. 2g (default: 3g / \$D2_DEFAULT_MEMORY)"
   echo "  -a <backend>    Analytics database backend: doris (DHIS2 >= 42; checked with -v,"
   echo "                  trusted with -f/-l)"
   echo "  -z <timezone>   Server time zone for Tomcat and Postgres, e.g. Africa/Lagos"
@@ -58,7 +58,7 @@ TOMCAT_VERSION=""  # empty = not specified; resolved below (auto from -v, else 1
 MEMORY=""
 ANALYTICS=""
 TIMEZONE="Etc/UTC"
-DEFAULT_MEMORY="${D2_DEFAULT_MEMORY:-4g}"  # Tomcat max heap when -m omitted
+DEFAULT_MEMORY="${D2_DEFAULT_MEMORY:-3g}"  # Tomcat max heap when -m omitted
 
 # Parse options
 while getopts "v:l:s:p:g:f:t:m:a:z:" opt; do
@@ -150,7 +150,7 @@ if ! [[ "$TIMEZONE" =~ ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$ ]] \
   exit 1
 fi
 
-# Resolve and validate the Tomcat max heap (default 4g; see D2_DEFAULT_MEMORY)
+# Resolve and validate the Tomcat max heap (default 3g; see D2_DEFAULT_MEMORY)
 MEMORY="${MEMORY:-$DEFAULT_MEMORY}"
 if ! echo "$MEMORY" | grep -qE '^[0-9]+[mMgG]$'; then
   echo "Error: -m memory must match ^[0-9]+[mMgG]\$ (e.g. 512m, 2g)"

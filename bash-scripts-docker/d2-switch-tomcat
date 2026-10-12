@@ -60,7 +60,7 @@ HTTP_PORT=$(grep -oE '"[0-9]+:8080"' "$COMPOSE" | head -1 | tr -d '"' | cut -d: 
 PG_PORT=$(grep -oE '"[0-9]+:5432"' "$COMPOSE" | head -1 | tr -d '"' | cut -d: -f1)
 MEMORY=$(grep -oE -- '-Xmx[0-9]+[mMgG]' "$COMPOSE" | head -1 | sed 's/-Xmx//')
 TIMEZONE=$(grep -oE 'TZ: "[^"]+"' "$COMPOSE" | head -1 | sed 's/TZ: "//; s/"$//')
-MEMORY="${MEMORY:-${D2_DEFAULT_MEMORY:-4g}}"
+MEMORY="${MEMORY:-${D2_DEFAULT_MEMORY:-3g}}"
 TIMEZONE="${TIMEZONE:-Etc/UTC}"
 if [ -z "$HTTP_PORT" ] || [ -z "$PG_PORT" ]; then
   echo "Error: could not read the HTTP/PostgreSQL ports from $COMPOSE"

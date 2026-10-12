@@ -209,7 +209,7 @@ TOOLS = [
                          "empty database."},
                 "memory": {"type": "string",
                            "description": "Tomcat max heap, e.g. '2g' "
-                           "(default 4g)."},
+                           "(default 3g)."},
                 "label": {"type": "string",
                           "description": "Free-text label (<=100 chars) "
                           "shown in list_instances — useful to mark what "

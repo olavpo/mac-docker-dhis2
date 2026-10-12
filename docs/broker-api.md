@@ -221,7 +221,7 @@ Body:
   "version": "2.42.4",           // optional; latest stable if you pass "42" or "2.42"
   "seed": "sl-demo-v42.sql.gz",  // optional; see Seed forms below
   "tomcat": "10",                // optional; "9"/"10". Auto-selected from version if omitted
-  "memory": "4g",                // optional; Tomcat max heap (-Xmx), default 4g
+  "memory": "4g",                // optional; Tomcat max heap (-Xmx), default 3g
   "http_port": 9010,             // optional; host HTTP port. Auto-selected (free) if omitted
   "pg_port": 5433,               // optional; host Postgres port. Auto-selected (free) if omitted
   "war_url":  "https://...",     // optional; admin only
@@ -242,7 +242,7 @@ Validation:
 - `tomcat` is the string `"9"` or `"10"`.
 - `tomcat` is auto-selected from `version` when omitted (DHIS2 ≤ 2.41 → `9`,
   ≥ 2.42 → `10`). Passing a `tomcat` that conflicts with `version` fails the job.
-- `memory` matches `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`); default `4g` when
+- `memory` matches `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`); default `3g` when
   omitted. Agent scope: heap above `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`)
   → `400`.
 - `http_port` / `pg_port` are integers `1024–65535` (else `400`). Omitted →
