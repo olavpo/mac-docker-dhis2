@@ -81,7 +81,7 @@ services:
       # Docker Desktop's VM has vm.max_map_count=262144 and refuses
       # per-container sysctls; this skips the BE's startup check.
       SKIP_CHECK_ULIMIT: "true"
-    mem_limit: 5500m
+    mem_limit: 6500m
     volumes:
       # fe.conf/be.conf must NOT be :ro — the entrypoint appends
       # priority_networks on first boot.

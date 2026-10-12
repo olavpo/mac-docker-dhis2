@@ -243,7 +243,7 @@ Validation:
 - `tomcat` is auto-selected from `version` when omitted (DHIS2 ≤ 2.41 → `9`,
   ≥ 2.42 → `10`). Passing a `tomcat` that conflicts with `version` fails the job.
 - `memory` matches `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`); default `3g` when
-  omitted. Agent scope: heap above `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`)
+  omitted (`2g` with `analytics`). Agent scope: heap above `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`)
   → `400`.
 - `http_port` / `pg_port` are integers `1024–65535` (else `400`). Omitted →
   the broker auto-selects a port not used or reserved by any other instance
@@ -252,7 +252,7 @@ Validation:
 - `analytics` must be `"doris"` and requires a `version` with DHIS2 major
   ≥ 42, or a `war_url`/`war_file` (→ `400` otherwise). A custom WAR's
   version is not checked; the caller vouches that it is 42 or later.
-  The instance gets a per-instance Apache Doris container (~5.5 GB RAM).
+  The instance gets a per-instance Apache Doris container (~6.5 GB RAM).
 - `label` is free text, at most 100 printable characters (→ `400` otherwise).
   Stored broker-side (`_broker/meta/`) with the creation timestamp.
 - `timezone` is an IANA name present in the host's zoneinfo, e.g.

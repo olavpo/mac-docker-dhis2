@@ -231,7 +231,7 @@ for normal analytics testing, plain Postgres instances behave identically
 to users.
 
 - Requires `version` with DHIS2 major ≥ 42 (`400` otherwise).
-- A Doris sidecar needs ~5.5 GB RAM, so your token is capped at
+- A Doris sidecar needs ~6.5 GB RAM, so your token is capped at
   `D2_BROKER_MAX_AGENT_DORIS` (default **1**) Doris-enabled instances
   (`409` when hit), and creates are slower (Doris image + boot).
 - Instance elements have `"analytics": "doris" | null` so you can see which
@@ -249,7 +249,7 @@ to users.
   analytics run fails with "Communications link failure" (stale JDBC pool)
   — stop/start the instance to fix.
 
-**Memory / heap**: instances default to `-Xmx3g`. Set a different heap at
+**Memory / heap**: instances default to `-Xmx3g` (`-Xmx2g` with Doris). Set a different heap at
 create with `"memory":"2g"` in the body, or change it later with
 `POST /instances/<name>/memory` `{"memory":"2g"}` (recreates Tomcat — a brief
 restart; DB preserved). Your token is capped by `D2_BROKER_MAX_AGENT_MEMORY`

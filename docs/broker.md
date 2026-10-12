@@ -39,9 +39,9 @@ launchd plist):
 | `D2_BROKER_MAX_AGENT_INSTANCES` | `5` | Cap on concurrent `agent-*` instances |
 | `D2_BROKER_JOB_TIMEOUT` | `7200` | Per-job timeout, seconds |
 | `D2_BROKER_BOOT_WAIT` | `1800` | Seconds a booting job holds for the instance API to become ready before finishing (serializes boot; capped) |
-| `D2_DEFAULT_MEMORY` | `3g` | Default Tomcat max heap for new instances (`d2-instance-create`) |
+| `D2_DEFAULT_MEMORY` | `3g` | Default Tomcat max heap for new instances (`d2-instance-create`); unset, Doris instances get `2g` |
 | `D2_BROKER_MAX_AGENT_MEMORY` | `8g` | Max heap an agent token may request |
-| `D2_BROKER_MAX_AGENT_DORIS` | `1` | Cap on agent-owned Doris-enabled instances (~5.5 GB RAM each) |
+| `D2_BROKER_MAX_AGENT_DORIS` | `1` | Cap on agent-owned Doris-enabled instances (~6.5 GB RAM each) |
 
 State lives in `$DHIS2_BASE/_broker/`: `tokens.json` (mode 0600),
 `broker.log`, `jobs/<id>.json` + `jobs/<id>.log`, `downloads/` (temporary
@@ -159,7 +159,7 @@ stopped), so new instances no longer collide with stopped ones.
 (`d2-instance-create -a doris`). Requires a `version` with DHIS2 major ≥ 42
 (else `400`), or a `war_url`/`war_file`, whose version the caller vouches for. Instance
 elements carry an `analytics` field (`"doris"` or `null`). A Doris sidecar
-needs ~5.5 GB RAM, so agent tokens are capped at `D2_BROKER_MAX_AGENT_DORIS`
+needs ~6.5 GB RAM, so agent tokens are capped at `D2_BROKER_MAX_AGENT_DORIS`
 (default 1) Doris-enabled instances. On DHIS2 42, aggregate and completeness
 analytics run in Doris; event/enrollment/tracked-entity analytics stay in
 Postgres until 43. Background and sizing:

@@ -32,7 +32,8 @@ usage() {
   echo "  -f <war_file>   Custom WAR file to deploy"
   echo "  -t <version>    Tomcat 9 or 10 (usually omit: auto-selected from -v;"
   echo "                  DHIS2 <=2.41 -> 9, >=2.42 -> 10). Default 10 without -v."
-  echo "  -m <size>       Java max heap, e.g. 2g (default: 3g / \$D2_DEFAULT_MEMORY)"
+  echo "  -m <size>       Java max heap, e.g. 2g (default: 3g, 2g with -a doris;"
+  echo "                  \$D2_DEFAULT_MEMORY overrides)"
   echo "  -a <backend>    Analytics database backend: doris (DHIS2 >= 42; checked with -v,"
   echo "                  trusted with -f/-l)"
   echo "  -z <timezone>   Server time zone for Tomcat and Postgres, e.g. Africa/Lagos"
@@ -150,7 +151,13 @@ if ! [[ "$TIMEZONE" =~ ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$ ]] \
   exit 1
 fi
 
-# Resolve and validate the Tomcat max heap (default 3g; see D2_DEFAULT_MEMORY)
+# Resolve and validate the Tomcat max heap (default 3g; see D2_DEFAULT_MEMORY).
+# Doris instances default to 2g: Docker on this setup is capped at 8 GB and
+# Doris takes up to 6.5 GB, while DHIS2 itself needs little heap when the
+# analytics work runs in Doris.
+if [ -z "$MEMORY" ] && [ "$ANALYTICS" = "doris" ] && [ -z "${D2_DEFAULT_MEMORY:-}" ]; then
+  MEMORY="2g"
+fi
 MEMORY="${MEMORY:-$DEFAULT_MEMORY}"
 if ! echo "$MEMORY" | grep -qE '^[0-9]+[mMgG]$'; then
   echo "Error: -m memory must match ^[0-9]+[mMgG]\$ (e.g. 512m, 2g)"

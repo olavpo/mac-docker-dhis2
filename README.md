@@ -114,7 +114,8 @@ d2-instance-create -v 2.41 myinstance   # Tomcat auto-selected (2.41 -> Tomcat 9
 d2-instance-create -v 42 -z Africa/Lagos myinstance   # server time zone (default Etc/UTC)
 
 d2-instance-create -v 42 -a doris myinstance   # with a dedicated Apache Doris
-# analytics database (DHIS2 >= 42 only; adds a ~5.5 GB Doris container —
+# analytics database (DHIS2 >= 42 only; adds a Doris container capped at 6.5 GB
+# and defaults the Tomcat heap to 2g —
 # see docs/doris/spike-findings-2026-07-14.md for what runs in Doris per version)
 
 d2-instance-create -f /path/to/dhis-2.44-snapshot.war -a doris myinstance
