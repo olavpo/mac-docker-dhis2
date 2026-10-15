@@ -241,7 +241,12 @@ echo "  Tomcat heap:     -Xmx$MEMORY"
 echo "  Time zone:       $TIMEZONE"
 
 # Copy template files
-cp "${DHIS2_BASE}/_templates/dhis.conf" "$DHIS2_HOME/DHIS2_HOME/dhis.conf"
+# Point DHIS2 at this instance's own database by its unique dev-net alias.
+# The bare service name `db` is ambiguous: every instance's db joins dev-net,
+# and Docker registers the service name there too, so `db` resolves to all
+# running instances' databases and Tomcat may connect to someone else's.
+sed "s|//db:5432/|//dhis2-${INSTANCE}-db:5432/|" \
+  "${DHIS2_BASE}/_templates/dhis.conf" > "$DHIS2_HOME/DHIS2_HOME/dhis.conf"
 cp "${DHIS2_BASE}/_templates/log4j2.xml" "$DHIS2_HOME/DHIS2_HOME/log4j2.xml"
 sed "s/\${INSTANCE_NAME}/$INSTANCE/g" "${DHIS2_BASE}/_templates/server.xml" > "$DHIS2_HOME/server.xml"
 
@@ -278,11 +283,12 @@ if [ "$ANALYTICS" = "doris" ]; then
   # Activates the doris service for every compose invocation in this
   # directory (startup, shutdown, delete, set-memory) with no flag changes.
   echo "COMPOSE_PROFILES=analytics-doris" > "$DHIS2_HOME/.env"
-  cat >> "$DHIS2_HOME/DHIS2_HOME/dhis.conf" << 'DORISCONF'
+  # Unique dev-net alias, not `doris`, for the same reason as `db` above.
+  cat >> "$DHIS2_HOME/DHIS2_HOME/dhis.conf" << DORISCONF
 
 # Apache Doris analytics database (added by d2-instance-create -a doris)
 analytics.database = doris
-analytics.connection.url = jdbc:mysql://doris:9030/analytics?useUnicode=true&characterEncoding=UTF-8&useSSL=false
+analytics.connection.url = jdbc:mysql://dhis2-${INSTANCE}-doris:9030/analytics?useUnicode=true&characterEncoding=UTF-8&useSSL=false
 analytics.connection.username = root
 analytics.connection.password =
 DORISCONF
