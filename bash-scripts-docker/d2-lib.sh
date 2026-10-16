@@ -208,3 +208,31 @@ wait_for_db() {
   
   return 1
 }
+
+# Verify that the Tomcat container sees the instance directory as it is now.
+# Docker Desktop's VirtioFS file sharing caches directory entries by host
+# path: after a delete, a container that bind-mounts the same path can see
+# the OLD directory (no ROOT.war, ghost log files) for its whole life, and
+# Tomcat starts with nothing deployed. d2-instance-create avoids reusing
+# mount paths (see .mounts-* there); this check catches anything that slips
+# through, so a create fails at once instead of a boot-wait that never ends.
+check_fresh_mounts() {
+  local instance="$1" home="$2"
+  local token d tomcat seen
+  token="$(date +%s)-$$-$RANDOM"
+  for d in DHIS2_HOME webapps logs temp; do
+    echo "$token" > "$home/$d/.mount-check"
+  done
+  tomcat=$(resolve_tomcat_container "$instance") || return 1
+  seen=$(docker exec "$tomcat" sh -c 'cat /DHIS2_home/.mount-check \
+    /usr/local/tomcat/webapps/.mount-check /usr/local/tomcat/logs/.mount-check \
+    /usr/local/tomcat/temp/.mount-check' 2>/dev/null | sort -u || true)
+  for d in DHIS2_HOME webapps logs temp; do
+    rm -f "$home/$d/.mount-check"
+  done
+  if [ "$seen" != "$token" ]; then
+    echo "Error: Tomcat sees a stale copy of $home (Docker Desktop file-sharing" \
+         "cache). Restart Docker Desktop, or recreate under another name." >&2
+    return 1
+  fi
+}

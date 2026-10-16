@@ -215,12 +215,18 @@ if [ -d "$DHIS2_HOME" ]; then
   exit 1
 fi
 
-# Create DHIS2 directory structure on host
+# Create DHIS2 directory structure on host. The directories Tomcat
+# bind-mounts live in a uniquely named .mounts-<timestamp> folder, linked
+# under their usual names. Docker Desktop caches bind-mount contents by host
+# path, so if an instance of the same name was deleted moments ago, reusing
+# the plain paths would hand Tomcat the old, deleted directory. Docker
+# resolves the links on the host, so each create mounts paths never seen.
 mkdir -p "$DHIS2_HOME"
-mkdir -p "$DHIS2_HOME/DHIS2_HOME"
-mkdir -p "$DHIS2_HOME/webapps"
-mkdir -p "$DHIS2_HOME/logs"
-mkdir -p "$DHIS2_HOME/temp"
+MOUNTS=".mounts-$(date +%Y%m%d%H%M%S)"
+for d in DHIS2_HOME webapps logs temp; do
+  mkdir -p "$DHIS2_HOME/$MOUNTS/$d"
+  ln -s "$MOUNTS/$d" "$DHIS2_HOME/$d"
+done
 mkdir -p "$DHIS2_HOME/lib"
 mkdir -p "$DHIS2_HOME/backups"
 
@@ -248,7 +254,8 @@ echo "  Time zone:       $TIMEZONE"
 sed "s|//db:5432/|//dhis2-${INSTANCE}-db:5432/|" \
   "${DHIS2_BASE}/_templates/dhis.conf" > "$DHIS2_HOME/DHIS2_HOME/dhis.conf"
 cp "${DHIS2_BASE}/_templates/log4j2.xml" "$DHIS2_HOME/DHIS2_HOME/log4j2.xml"
-sed "s/\${INSTANCE_NAME}/$INSTANCE/g" "${DHIS2_BASE}/_templates/server.xml" > "$DHIS2_HOME/server.xml"
+sed "s/\${INSTANCE_NAME}/$INSTANCE/g" "${DHIS2_BASE}/_templates/server.xml" > "$DHIS2_HOME/$MOUNTS/server.xml"
+ln -s "$MOUNTS/server.xml" "$DHIS2_HOME/server.xml"
 
 # Doris backend: copy conf assets, ensure the Postgres JDBC jar (cached in
 # _templates/doris/, downloaded from Maven Central on first use), activate
@@ -316,6 +323,11 @@ docker network create dev-net >/dev/null 2>&1 || true
 # Start the instance
 cd "$DHIS2_HOME"
 docker compose up -d
+
+# Fail now, not after a 30-minute boot-wait, if Tomcat sees stale mounts.
+if ! check_fresh_mounts "$INSTANCE" "$DHIS2_HOME"; then
+  exit 1
+fi
 
 # Wait for database to be ready
 echo "Waiting for database to be ready..."
