@@ -491,7 +491,14 @@ def wait_for_boot(name, log_file):
         while time.monotonic() < deadline:
             elem = next((i for i in list_instances()
                          if i["name"] == name), None)
-            if elem and instance_readiness(elem) == "ready":
+            # Removed out from under us (directory and containers gone): it
+            # can never become ready, so don't hold the worker for the cap.
+            if elem is None:
+                log.write(f"[boot-wait] {name} no longer exists; releasing "
+                          f"worker\n")
+                log.flush()
+                return
+            if instance_readiness(elem) == "ready":
                 log.write(f"[boot-wait] {name} is ready\n")
                 log.flush()
                 return
@@ -974,6 +981,11 @@ class JobManager:
                             elem["dhis2_major_version"] = instance_version(
                                 job["instance"])
                         job["result"] = elem
+                    elif job["op"] == "delete":
+                        # Otherwise a later create of the same name outside
+                        # the broker inherits the old label and CORS origins.
+                        (meta_dir() / f"{job['instance']}.json").unlink(
+                            missing_ok=True)
                     elif job["op"] == "backup":
                         root = backups_dir() / job["instance"]
                         dumps = sorted(

@@ -577,3 +577,20 @@ class SeedNotes(unittest.TestCase):
         Path(str(self.dump) + ".json").write_text('{"description": "d"}')
         el = broker.dump_element(self.dump, "seeds", Path(self.tmp.name))
         self.assertEqual(el["notes"], {"description": "d"})
+
+
+class BootWait(unittest.TestCase):
+    def test_releases_when_instance_gone(self):
+        orig = broker.list_instances
+        broker.list_instances = lambda: []
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                log = Path(d) / "j.log"
+                os.environ["D2_BROKER_BOOT_WAIT"] = "60"
+                try:
+                    broker.wait_for_boot("agent-gone", log)
+                finally:
+                    del os.environ["D2_BROKER_BOOT_WAIT"]
+                self.assertIn("no longer exists", log.read_text())
+        finally:
+            broker.list_instances = orig
