@@ -829,6 +829,8 @@ class JobManager:
                         "broker restarted mid-job; the instance may be "
                         "half-done (a create or reset leaves it unusable): "
                         "delete or reset it, then retry")
+                    job["finished_at"] = now_iso()
+                    self._persist(job)
                 self.jobs[job["id"]] = job
             except Exception:
                 continue

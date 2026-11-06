@@ -5,6 +5,7 @@ Run: python3 -m unittest test_d2_broker -v   (from bash-scripts-docker/)
 """
 import importlib.util
 import importlib.machinery
+import json
 import os
 import tempfile
 import unittest
@@ -440,6 +441,39 @@ class SeedResetError(unittest.TestCase):
 
     def test_unknown_instance_skips_guard(self):
         self.assertIsNone(broker.seed_reset_error(42, None))
+
+
+class LoadPreviousPersists(unittest.TestCase):
+    """A job left queued/running by a dead broker is marked interrupted on
+    startup, and that must reach the job file too, or the file says
+    'running' forever."""
+
+    def test_orphaned_job_rewritten_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("DHIS2_BASE")
+            os.environ["DHIS2_BASE"] = tmp
+            real_worker = broker.JobManager._worker
+            broker.JobManager._worker = lambda self: None
+            try:
+                jobs = Path(tmp, "_broker", "jobs")
+                jobs.mkdir(parents=True)
+                for jid, status in (("j-run", "running"), ("j-que", "queued"),
+                                    ("j-ok", "succeeded")):
+                    (jobs / f"{jid}.json").write_text(json.dumps(
+                        {"id": jid, "op": "create", "instance": "x",
+                         "status": status, "created_at": broker.now_iso()}))
+                broker.JobManager()
+                on_disk = {jid: json.loads((jobs / f"{jid}.json").read_text())
+                           ["status"] for jid in ("j-run", "j-que", "j-ok")}
+                self.assertEqual(on_disk, {"j-run": "interrupted",
+                                           "j-que": "interrupted",
+                                           "j-ok": "succeeded"})
+            finally:
+                broker.JobManager._worker = real_worker
+                if old is None:
+                    os.environ.pop("DHIS2_BASE", None)
+                else:
+                    os.environ["DHIS2_BASE"] = old
 
 
 class SubmitExclusive(unittest.TestCase):
