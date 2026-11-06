@@ -171,8 +171,9 @@ major, resolved from releases.dhis2.org) or an exact release (`"2.42.4"`,
 | `version` only | That DHIS2 release on an empty database (Flyway initializes it; no org units, no metadata, only the admin user) |
 | `version` + `seed` | That release on the seeded database — the usual choice for testing |
 
-`seed` without `version` is valid but rarely useful: the database is
-restored but no DHIS2 webapp is deployed to serve it.
+`seed` without `version` takes the version from the seed's `_vNN` token
+(`…_v43.pgc` → 43). A seed name without that token needs an explicit
+`version`; the broker answers 400 otherwise.
 
 **Blank instances are cheap** — about 2 minutes for a blank 2.42/2.43 and
 2.5–3 minutes for an SL-seeded 2.40/2.41, so version matrices are practical.

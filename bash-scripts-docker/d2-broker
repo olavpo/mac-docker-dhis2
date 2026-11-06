@@ -550,6 +550,23 @@ def seed_major(filename):
     return int(matches[-1]) if matches else None
 
 
+def create_version(version, seed, custom_war):
+    """(version, error) for a create request. d2-instance-create deploys a
+    WAR only when given one, so a seeded create without version or WAR
+    restores the database, then leaves Tomcat restart-looping on an empty
+    webapps/ while boot-wait holds the worker for its full cap. Default the
+    version from the seed's _vNN token; refuse when the name has none. A
+    create with neither seed nor version stays a deliberate empty shell."""
+    if version or custom_war or not seed:
+        return version, None
+    maj = seed_major(urlparse(str(seed)).path or str(seed))
+    if maj is not None:
+        return str(maj), None
+    return None, ("a seeded create needs a 'version': the seed name has no "
+                  "_vNN token to take it from, and without a version no "
+                  "DHIS2 WAR is deployed")
+
+
 def seed_reset_error(seed_maj, cur_maj):
     """Refuse restoring a seed from a NEWER DHIS2 major than the instance
     runs: Flyway can't downgrade, so the instance boots into 'database is
@@ -1256,9 +1273,14 @@ class Handler(BaseHTTPRequestHandler):
         if timezone_name:
             argv += ["-z", timezone_name]
         version = body.get("version")
+        if version and not VERSION_RE.match(str(version)):
+            raise ApiError(400, "version must look like 42, 2.42 or 2.42.1")
+        version, err = create_version(
+            version, body.get("seed"),
+            bool(body.get("war_url") or body.get("war_file")))
+        if err:
+            raise ApiError(400, err)
         if version:
-            if not VERSION_RE.match(str(version)):
-                raise ApiError(400, "version must look like 42, 2.42 or 2.42.1")
             argv += ["-v", str(version)]
         analytics = body.get("analytics")
         if analytics:

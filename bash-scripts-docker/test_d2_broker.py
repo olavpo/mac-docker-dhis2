@@ -395,6 +395,34 @@ class SeedMajor(unittest.TestCase):
         self.assertIsNone(broker.seed_major("plain-dump.sql.gz"))
 
 
+class CreateVersion(unittest.TestCase):
+    def test_explicit_version_kept(self):
+        self.assertEqual(broker.create_version("43", "sl_v42.pgc", False),
+                         ("43", None))
+
+    def test_seed_supplies_version(self):
+        self.assertEqual(
+            broker.create_version(None, "dhis2-db-sierra-leone_v43.pgc", False),
+            ("43", None))
+
+    def test_seed_url_supplies_version(self):
+        self.assertEqual(
+            broker.create_version(None, "https://x.org/d/sl_v41.sql.gz?t=1", False),
+            ("41", None))
+
+    def test_seed_without_token_refused(self):
+        version, err = broker.create_version(None, "plain-dump.pgc", False)
+        self.assertIsNone(version)
+        self.assertIn("version", err)
+
+    def test_custom_war_needs_no_version(self):
+        self.assertEqual(broker.create_version(None, "plain.pgc", True),
+                         (None, None))
+
+    def test_empty_shell_allowed(self):
+        self.assertEqual(broker.create_version(None, None, False), (None, None))
+
+
 class SeedResetError(unittest.TestCase):
     def test_newer_seed_refused(self):
         msg = broker.seed_reset_error(42, 41)
