@@ -6,11 +6,14 @@
 #   ./setup.sh update          - Update symlinks, add new templates, report drift
 #                                (never overwrites a customised template)
 #   ./setup.sh sync-templates  - Overwrite installed templates with repo versions
+#
+# Symlinks go to $D2_BIN_DIR (default /usr/local/bin). sudo is used only when
+# that directory is not writable, e.g. D2_BIN_DIR=$HOME/.local/bin needs none.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_DIR="/usr/local/bin"
+TARGET_DIR="${D2_BIN_DIR:-/usr/local/bin}"
 
 usage() {
   echo "Usage: $0 <install|update|sync-templates>"
@@ -42,11 +45,14 @@ fi
 
 create_symlinks() {
   local added=0
+  local sudo=""
+  mkdir -p "$TARGET_DIR" 2>/dev/null || sudo mkdir -p "$TARGET_DIR"
+  [ -w "$TARGET_DIR" ] || sudo="sudo"
   for script in "$SCRIPT_DIR"/bash-scripts-docker/d2-*; do
     if [ -f "$script" ]; then
       script_name=$(basename "$script")
       echo "  $TARGET_DIR/$script_name -> $script"
-      sudo ln -sf "$script" "$TARGET_DIR/$script_name"
+      $sudo ln -sf "$script" "$TARGET_DIR/$script_name"
       added=$((added + 1))
     fi
   done

@@ -14,7 +14,7 @@ clients:
   with the admin token.
 
 It is a single Python 3 file with no dependencies:
-`bash-scripts-docker/d2-broker` (symlinked into `/usr/local/bin` by
+`bash-scripts-docker/d2-broker` (symlinked into `/usr/local/bin` or `$D2_BIN_DIR` by
 `setup.sh` like the other tools).
 
 ## Quick start

@@ -52,7 +52,9 @@ All scripts are in `bash-scripts-docker/` and expect:
 ```
 
 3. Run the setup script — copies templates to `$DHIS2_BASE/_templates/` and
-   symlinks the scripts into `/usr/local/bin`:
+   symlinks the scripts into `/usr/local/bin` (or `$D2_BIN_DIR` if set, e.g.
+   `export D2_BIN_DIR=$HOME/.local/bin` to skip sudo; the directory must be
+   on your `PATH`):
 
 ```bash
    ./setup.sh install         # first time
