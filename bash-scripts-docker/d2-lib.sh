@@ -38,7 +38,16 @@ abspath() {
 # Port checking
 is_port_in_use() {
   local port="$1"
-  if command -v lsof >/dev/null 2>&1; then
+  # Prefer a connect probe: lsof walks every process's open files and can
+  # block in the kernel indefinitely (seen with a sluggish SMB mount on
+  # macOS), hanging d2-instance-create before it does anything. Docker and
+  # most dev servers listen on 0.0.0.0/127.0.0.1, which this catches.
+  if command -v nc >/dev/null 2>&1; then
+    if nc -z -w 2 127.0.0.1 "$port" >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  elif command -v lsof >/dev/null 2>&1; then
     lsof -iTCP:"$port" -sTCP:LISTEN -n -P >/dev/null 2>&1
   elif command -v ss >/dev/null 2>&1; then
     ss -tuln | grep -q ":$port "
