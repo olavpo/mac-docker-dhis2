@@ -12,6 +12,14 @@ services:
     # and optionally Doris. effective_cache_size is a planner hint, not an
     # allocation. No mem_limit on purpose: an OOM-killed Postgres mid-restore
     # is worse than brief memory pressure on the VM.
+    # Measured 2026-11-17 (Lao HMIS, full analytics, 8-vCPU Colima VM on an
+    # Apple M6 with mixed core types): serial index builds
+    # (max_parallel_maintenance_workers=0) cut the 2254-index DATA_VALUE stage
+    # from ~30 to ~19 min. DHIS2 already builds several indexes at once, and a
+    # parallel build waits on its slowest worker (often one on an efficiency
+    # core). Larger work_mem made no difference to table population.
+    # autovacuum_work_mem caps autovacuum workers, which otherwise take
+    # maintenance_work_mem each.
     command:
       - postgres
       - -c
@@ -21,11 +29,11 @@ services:
       - -c
       - work_mem=16MB
       - -c
-      - maintenance_work_mem=256MB
+      - maintenance_work_mem=512MB
       - -c
       - temp_buffers=16MB
       - -c
-      - effective_cache_size=2GB
+      - effective_cache_size=4GB
       - -c
       - synchronous_commit=off
       - -c
@@ -40,6 +48,10 @@ services:
       - checkpoint_completion_target=0.8
       - -c
       - max_connections=100
+      - -c
+      - max_parallel_maintenance_workers=0
+      - -c
+      - autovacuum_work_mem=256MB
     environment:
       POSTGRES_USER: dhis
       POSTGRES_PASSWORD: dhis
