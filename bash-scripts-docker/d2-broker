@@ -18,10 +18,12 @@
 #   Subcommands:
 #     d2-broker run         Run the server in the foreground
 #     d2-broker tokens      Create (if missing) and print the API tokens
-#     d2-broker install     Install as a launchd agent (starts at login)
+#     d2-broker install     Install as a launchd agent (starts at login);
+#                           keeps D2_* env vars of an existing plist
 #     d2-broker restart     Wait until no job is queued or running, then
-#                           restart the launchd agent (a plain kickstart
-#                           kills running jobs mid-step)
+#                           reload the launchd agent, re-reading its plist
+#                           (a plain kickstart kills running jobs mid-step
+#                           and ignores plist edits)
 #     d2-broker uninstall   Remove the launchd agent
 #     d2-broker status      Show launchd + HTTP health status
 #
@@ -42,11 +44,12 @@
 #                                    to become ready before finishing, so two
 #                                    instances never boot concurrently (default
 #                                    1800; capped so a stuck boot can't wedge
-#                                    the queue).
+#                                    the main lane).
 
 import base64
 import json
 import os
+import plistlib
 import re
 import secrets
 import shutil
@@ -61,6 +64,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Queue
 from urllib.parse import urlparse, parse_qs
+from xml.sax.saxutils import escape as xml_escape
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_PORT = 9300
@@ -781,10 +785,28 @@ def resolve_seed(seed, scope):
 
 
 # --- Jobs ------------------------------------------------------------------
-# Long-running operations (create / reset / delete) run as jobs on a single
-# worker thread. Global serialization is deliberate: d2-instance-create
-# auto-selects free ports by scanning, so two concurrent creates could pick
-# the same port. Job logs and a JSON snapshot persist under _broker/jobs/.
+# Long-running operations run as jobs in lanes, each a single serial worker
+# thread (see JOB_LANES). Within a lane serialization is deliberate: the main
+# lane holds every op that boots an app or restores a DB, since
+# d2-instance-create auto-selects free ports by scanning (two concurrent
+# creates could pick the same port) and two Flyway boots starve each other.
+# Analytics runs get their own lane so a 40-minute run doesn't block other
+# instances' creates, and stop/delete get a light lane so freeing resources
+# never waits behind heavy work. Job logs and a JSON snapshot persist under
+# _broker/jobs/.
+
+# op -> lane; ops not listed run in the "main" lane.
+JOB_LANES = {"analytics": "analytics", "stop": "light", "delete": "light"}
+LANES = ("main", "analytics", "light")
+
+
+def job_lane(op, active_on_instance):
+    """The lane a new job runs in. A delete of an instance that already has
+    an active job joins that job's lane, so it runs after it (superseding
+    what it produced) instead of tearing the instance down mid-create."""
+    if op == "delete" and active_on_instance:
+        return active_on_instance[0].get("lane") or "main"
+    return JOB_LANES.get(op, "main")
 
 class ApiError(Exception):
     def __init__(self, status, message):
@@ -807,12 +829,14 @@ class JobManager:
     def __init__(self):
         self.jobs = {}
         self.lock = threading.Lock()
-        self.queue = Queue()
+        self.queues = {lane: Queue() for lane in LANES}
         self.dir = broker_dir() / "jobs"
         self.dir.mkdir(exist_ok=True)
         self.timeout = int(os.environ.get("D2_BROKER_JOB_TIMEOUT", 7200))
         self._load_previous()
-        threading.Thread(target=self._worker, daemon=True).start()
+        for lane in LANES:
+            threading.Thread(target=self._worker, args=(lane,),
+                             daemon=True).start()
 
     def _load_previous(self):
         for f in self.dir.glob("*.json"):
@@ -864,9 +888,9 @@ class JobManager:
         job — checked under the same lock hold as the enqueue, so two
         concurrent requests for one instance can't both pass (the handler's
         check_no_active_job is only an early fast-fail). Exception: a
-        delete may queue behind any active op (the serial worker runs it
-        after, superseding whatever that op produced) — but not behind
-        another delete."""
+        delete may queue behind any active op (it joins that op's lane, so
+        the lane's serial worker runs it after, superseding whatever that op
+        produced) — but not behind another delete."""
         job = {
             "id": "j-" + secrets.token_hex(4),
             "op": op,
@@ -890,10 +914,11 @@ class JobManager:
                 raise ApiError(409, f"instance '{instance}' already has an "
                                     f"active job: {blocking[0]['id']} "
                                     f"({blocking[0]['op']})")
+            job["lane"] = job_lane(op, active)
             self.jobs[job["id"]] = job
         self._persist(job)
-        self.queue.put((job, steps, post_cmds or [], cleanup or [],
-                        post_boot))
+        self.queues[job["lane"]].put((job, steps, post_cmds or [],
+                                      cleanup or [], post_boot))
         return job
 
     def _remove_failed_create(self, name, log_file):
@@ -940,9 +965,10 @@ class JobManager:
             return ""
         return "\n".join(path.read_text(errors="replace").splitlines()[-lines:])
 
-    def _worker(self):
+    def _worker(self, lane):
         while True:
-            job, steps, post_cmds, cleanup, post_boot = self.queue.get()
+            job, steps, post_cmds, cleanup, post_boot = \
+                self.queues[lane].get()
             job["status"] = "running"
             job["started_at"] = now_iso()
             self._persist(job)
@@ -980,7 +1006,7 @@ class JobManager:
                 if job["exit_code"] == 0:
                     if job["op"] in ("create", "reset", "start", "upgrade",
                                      "memory"):
-                        # Boot-gate: hold the single, serialized worker until
+                        # Boot-gate: hold the main lane's serial worker until
                         # the API is up, so the next booting job doesn't run
                         # its Flyway migration concurrently and starve this
                         # one. Waiting first also means the result below (and
@@ -1520,9 +1546,9 @@ class Handler(BaseHTTPRequestHandler):
             self.submit("restart-db", name, [argv], scope))
 
     def run_analytics(self, name, scope):
-        """Analytics table generation as a broker job. Runs on the single
-        worker like every job, so it never overlaps another instance's
-        create, restore or analytics run."""
+        """Analytics table generation as a broker job. Runs in the analytics
+        lane, so it never overlaps another analytics run but doesn't block
+        (or wait for) creates, restores and boots in the main lane."""
         body = self.read_body()
         self.require_instance(name)
         self.check_no_active_job(name)
@@ -1606,6 +1632,36 @@ def plist_path():
     return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 
 
+def kept_plist_env(plist_bytes):
+    """The D2_* settings of an existing launchd plist (e.g. a hand-added
+    D2_BROKER_MAX_AGENT_INSTANCES or D2_DEFAULT_MEMORY), so re-running
+    install doesn't silently drop host tuning. {} if unreadable."""
+    try:
+        env = plistlib.loads(plist_bytes).get("EnvironmentVariables") or {}
+    except Exception:
+        return {}
+    return {k: str(v) for k, v in env.items() if k.startswith("D2_")}
+
+
+def launchd_reload(path):
+    """bootout + bootstrap the agent. Unlike `kickstart -k`, this re-reads
+    the plist, so edits to its EnvironmentVariables take effect."""
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"],
+                   capture_output=True)
+    # bootout returns before the old service is gone; bootstrapping too soon
+    # fails with "Bootstrap failed: 5: Input/output error". Retry briefly.
+    for attempt in range(10):
+        res = subprocess.run(
+            ["launchctl", "bootstrap", f"gui/{uid}", str(path)],
+            capture_output=True, text=True)
+        if res.returncode == 0:
+            return
+        time.sleep(1)
+    sys.exit(f"launchctl bootstrap failed: "
+             f"{(res.stderr or res.stdout).strip()}")
+
+
 def cmd_install():
     load_or_create_tokens()
     script = Path(__file__).resolve()
@@ -1615,12 +1671,15 @@ def cmd_install():
         f"      <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:"
         f"/usr/bin:/bin:/usr/sbin:/sbin</string>\n"
     )
+    extra = kept_plist_env(plist_path().read_bytes()
+                           if plist_path().is_file() else b"")
     if os.environ.get("D2_BROKER_PORT"):
-        env_lines += (f"      <key>D2_BROKER_PORT</key>"
-                      f"<string>{broker_port()}</string>\n")
+        extra["D2_BROKER_PORT"] = str(broker_port())
     if os.environ.get("D2_BROKER_BIND"):
-        env_lines += (f"      <key>D2_BROKER_BIND</key>"
-                      f"<string>{os.environ['D2_BROKER_BIND']}</string>\n")
+        extra["D2_BROKER_BIND"] = os.environ["D2_BROKER_BIND"]
+    for key, value in sorted(extra.items()):
+        env_lines += (f"      <key>{xml_escape(key)}</key>"
+                      f"<string>{xml_escape(value)}</string>\n")
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1645,21 +1704,7 @@ def cmd_install():
     path = plist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(plist)
-    uid = os.getuid()
-    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"],
-                   capture_output=True)
-    # bootout returns before the old service is gone; bootstrapping too soon
-    # fails with "Bootstrap failed: 5: Input/output error". Retry briefly.
-    for attempt in range(10):
-        res = subprocess.run(
-            ["launchctl", "bootstrap", f"gui/{uid}", str(path)],
-            capture_output=True, text=True)
-        if res.returncode == 0:
-            break
-        time.sleep(1)
-    else:
-        sys.exit(f"launchctl bootstrap failed: "
-                 f"{(res.stderr or res.stdout).strip()}")
+    launchd_reload(path)
     print(f"Installed launchd agent {LAUNCHD_LABEL}")
     print(f"  plist: {path}")
     print(f"  log:   {log}")
@@ -1700,8 +1745,8 @@ def cmd_restart():
             f"{j['id']} {j['op']} {j['instance']}" for j in active),
             flush=True)
         time.sleep(15)
-    subprocess.run(["launchctl", "kickstart", "-k",
-                    f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], check=True)
+    # Reload rather than kickstart, so plist edits (env vars) take effect.
+    launchd_reload(plist_path())
     time.sleep(2)
     cmd_status()
 

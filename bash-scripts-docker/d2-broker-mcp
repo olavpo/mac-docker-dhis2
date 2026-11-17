@@ -172,7 +172,8 @@ _JOB_ARG = {"type": "string",
             "description": "Job id, e.g. j-1a2b3c4d."}
 
 # Mutations return 202 + a job object: pass job.id to wait_for_job. The
-# broker runs one job at a time, so queued jobs may wait for another's boot.
+# broker runs one job at a time per lane (boots/restores, analytics,
+# stop/delete), so queued jobs may wait for another's boot.
 _JOB_NOTE = (" Returns a job (202) — poll it to completion with "
              "wait_for_job.")
 
@@ -209,7 +210,8 @@ TOOLS = [
                          "empty database."},
                 "memory": {"type": "string",
                            "description": "Tomcat max heap, e.g. '2g' "
-                           "(default 3g)."},
+                           "(default: the host's D2_DEFAULT_MEMORY, "
+                           "else 3g)."},
                 "label": {"type": "string",
                           "description": "Free-text label (<=100 chars) "
                           "shown in list_instances — useful to mark what "
@@ -267,8 +269,8 @@ TOOLS = [
         "description":
             "Generate analytics tables on an instance and wait for DHIS2 to "
             "report completion; the job fails if the run errors or Tomcat "
-            "dies mid-run. Heavy: it runs on the broker's single queue, so "
-            "other creates wait behind it." + _JOB_NOTE,
+            "dies mid-run. Heavy: one analytics run at a time across all "
+            "instances, so a later one waits behind it." + _JOB_NOTE,
         "inputSchema": {
             "type": "object",
             "properties": {

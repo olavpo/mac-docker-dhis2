@@ -106,16 +106,23 @@ flips to terminal, `finished_at`, `exit_code`, `error`, and (on success)
 status only after all other fields are set, so polling clients never see
 a half-written `succeeded`.
 
-A single global worker processes the queue. Two POSTs to different
-instances at the same time both succeed (both get `202`), but they run
-sequentially. A second POST targeting an **instance that already has an
-active job** gets `409` — except a **delete**, which queues behind the
-active job and runs after it (a second delete on the same instance
-still gets `409`).
+Jobs run in three lanes, each processed by its own serial worker; the
+lanes run in parallel. The job's `lane` field says which:
+
+- `main`: create, reset, start, upgrade, memory, restart-db, backup
+- `analytics`: analytics
+- `light`: stop, delete
+
+Two POSTs to different instances at the same time both succeed (both get
+`202`); if they're in the same lane they run sequentially, otherwise
+concurrently. A second POST targeting an **instance that already has an
+active job** gets `409` — except a **delete**, which joins the active
+job's lane and runs after it (a second delete on the same instance still
+gets `409`).
 
 Jobs that boot the app (`create`, `reset`, `start`, `upgrade`, `memory`)
 stay `running` until the instance's API answers as `ready` — not merely
-until the containers are up. This is deliberate: because the worker is
+until the containers are up. This is deliberate: because the main lane is
 serialized, holding here keeps the next instance from starting its heavy
 Flyway boot while this one is still migrating (the two would starve each
 other). If the instance isn't ready within `D2_BROKER_BOOT_WAIT` seconds
@@ -242,8 +249,8 @@ Validation:
 - `tomcat` is the string `"9"` or `"10"`.
 - `tomcat` is auto-selected from `version` when omitted (DHIS2 ≤ 2.41 → `9`,
   ≥ 2.42 → `10`). Passing a `tomcat` that conflicts with `version` fails the job.
-- `memory` matches `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`); default `3g` when
-  omitted. Agent scope: heap above `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`)
+- `memory` matches `^[0-9]+[mMgG]$` (e.g. `512m`, `2g`); default when
+  omitted: the broker host's `D2_DEFAULT_MEMORY`, else `3g`. Agent scope: heap above `D2_BROKER_MAX_AGENT_MEMORY` (default `8g`)
   → `400`.
 - `http_port` / `pg_port` are integers `1024–65535` (else `400`). Omitted →
   the broker auto-selects a port not used or reserved by any other instance
@@ -459,9 +466,9 @@ succeeds only when DHIS2 reports completion without an error. It fails
 rather than hanging when the notifications vanish mid-run (Tomcat
 restarted), when nothing starts within 10 minutes (typically a stale
 `RUNNING` analytics job left by an earlier restart; the log says how to
-clear it), or after ~6900 s. Like every job it runs on the single worker, so
-it never overlaps another instance's restore, boot or analytics run — and
-other jobs queue behind it.
+clear it), or after ~6900 s. It runs in the `analytics` lane: it never
+overlaps another analytics run (later ones queue behind it), but creates,
+restores, boots, stops and deletes on other instances proceed alongside it.
 
 ### `GET /seeds`
 

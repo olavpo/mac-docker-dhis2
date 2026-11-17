@@ -50,18 +50,22 @@ curl -s -H "Authorization: Bearer $DHIS2_BROKER_TOKEN" "$DHIS2_BROKER_URL/instan
   first; delete only `agent-*` ones (and see the ownership caveat above —
   prefer the oldest `created_at`, stopped, unlabelled candidates). A create
   that **fails** is deleted by the broker, so failed attempts don't use up
-  slots. In practice, keep the live footprint to
-  **1 running instance where possible, 2 max**: two DHIS2 instances *booting*
+  slots. The cap limits instances, not *running* ones — RAM does that: keep
+  at most **4 running `agent-*` instances across all sessions** (check
+  `GET /instances` before starting another) and stop the ones you are not
+  actively using; a stopped instance only costs disk and starts again in a
+  couple of minutes. Two DHIS2 instances *booting*
   concurrently starve each other (20+ minutes with nothing on `/api`). The
   broker now guards against this — a create/reset job stays `running` until its
   instance's API is up, so a second create you submit waits its turn rather
   than booting alongside the first — but keep the footprint low anyway for RAM.
   The same contention applies to **any heavy DB work, not just boots**: a seed
   restore on one instance while another ran analytics stretched an ~11-minute
-  analytics run to ~25 minutes. The broker serializes its own jobs, but work
+  analytics run to ~25 minutes. The broker runs one boot/restore and one
+  analytics job at a time (in separate lanes, which can overlap), but work
   you trigger through an instance's API (analytics runs, large imports/deletes)
-  is invisible to it — so as a rule, run **one heavy operation across all
-  instances at a time**. Large *synchronous* metadata imports or deletes
+  is invisible to it — so run analytics through the broker, and avoid
+  launching heavy API work while another instance is doing the same. Large *synchronous* metadata imports or deletes
   count: a 16,000-object `importStrategy=DELETE` that hadn't answered after
   300 s took the shared Tomcat down with it. When several agents share one
   instance, give one of them ownership of restarts and analytics runs.
@@ -250,16 +254,22 @@ to users.
   analytics run fails with "Communications link failure" (stale JDBC pool)
   — stop/start the instance to fix.
 
-**Memory / heap**: instances default to `-Xmx3g`. Set a different heap at
+**Memory / heap**: instances default to the host's `D2_DEFAULT_MEMORY`
+(currently `1536m`; `3g` where unset). That is enough for full all-years
+analytics on the Sierra Leone and Lao HMIS seeds (both pass even at 1g;
+Postgres, not Tomcat, does the heavy lifting), so don't raise it
+pre-emptively — RAM is shared by up to 4 running instances. Raise it for
+large imports or many concurrent users. Set a different heap at
 create with `"memory":"2g"` in the body, or change it later with
 `POST /instances/<name>/memory` `{"memory":"2g"}` (recreates Tomcat — a brief
 restart; DB preserved). Your token is capped by `D2_BROKER_MAX_AGENT_MEMORY`
 (default `8g`); a larger request returns `400`. Size format: `^[0-9]+[mMgG]$`
 (e.g. `512m`, `2g`).
 
-**Polling:** poll `GET /jobs/<id>` every 5–10 s. Jobs run on a single global
-queue, so `queued` can mean "waiting behind someone else's job" — it is not
-a hang. Creates with a `version` download a WAR (hundreds of MB) and seed
+**Polling:** poll `GET /jobs/<id>` every 5–10 s. Jobs run in three serial
+lanes — `main` (create/reset/start/upgrade/memory/restart-db/backup),
+`analytics`, and `light` (stop/delete) — so `queued` can mean "waiting
+behind someone else's job in the same lane" — it is not a hang. Creates with a `version` download a WAR (hundreds of MB) and seed
 restores can take minutes; expect several minutes end-to-end and don't give
 up early.
 
@@ -436,9 +446,9 @@ counts.
   and ends `succeeded` only when DHIS2 reports completion without error. It
   fails, instead of hanging, if Tomcat dies mid-run or a stale `RUNNING`
   analytics job blocks the new one (the error says how to clear it). It
-  runs on the broker's single queue, so it never overlaps another
-  instance's restore or analytics run — and other sessions' creates wait
-  behind it. `last_years` counts back from *today*: on a seed whose data
+  runs in the broker's analytics lane: it never overlaps another
+  analytics run (yours queues behind another session's), but creates and
+  boots elsewhere can run alongside it and slow it down. `last_years` counts back from *today*: on a seed whose data
   ends in 2023, `last_years: 3` in 2026 builds nothing useful; check the
   seed's `data_until` note. Omit it to build every year.
   Expect **~5–15 min on the SL seeds** (v43 on 2.43.1: ~9 min for the first

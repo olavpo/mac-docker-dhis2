@@ -95,14 +95,24 @@ initializes an empty database via Flyway on first start.
 Create, reset, start, stop, delete, backup and upgrade all return **202 with
 a job**, because the underlying operations range from seconds (stop) to hours
 (large restore).
-Poll `GET /jobs/<id>` until `status` is terminal. Jobs run on a **single
-worker, globally serialized** — deliberate, since `d2-instance-create`
-auto-selects free ports by scanning, so concurrent creates could collide.
+Poll `GET /jobs/<id>` until `status` is terminal. Jobs run in three
+**lanes**, each a single serial worker:
+
+| Lane | Ops | Why serialized |
+|---|---|---|
+| `main` | create, reset, start, upgrade, memory, restart-db, backup | `d2-instance-create` picks free ports by scanning (concurrent creates could collide), and two Flyway boots starve each other |
+| `analytics` | analytics | Two analytics runs mostly slow each other down |
+| `light` | stop, delete | — (cheap; never waits behind heavy work) |
+
+Lanes run in parallel, so an analytics run (40+ minutes on a large DB)
+doesn't hold up other instances' creates, and a stop or delete never waits
+for either. A delete of an instance that already has an active job joins
+that job's lane and runs after it. Each job carries its `lane`.
 
 **Booting jobs hold until the API is ready.** A `create`/`reset`/`start`/
 `upgrade`/`memory` job stays `running` until the instance answers as `ready`
-(or `D2_BROKER_BOOT_WAIT` seconds elapse), *then* finishes. Because the worker
-is serialized, this keeps two instances from running heavy Flyway boots at once
+(or `D2_BROKER_BOOT_WAIT` seconds elapse), *then* finishes. Because the main
+lane is serialized, this keeps two instances from running heavy Flyway boots at once
 and starving each other. The cap means a stuck boot can't wedge the queue; on
 cap timeout the job still succeeds (a log line notes the instance may still be
 migrating).
@@ -111,7 +121,11 @@ Job statuses: `queued → running → succeeded | failed`; `interrupted` marks
 jobs that were in flight when the broker was restarted. A restart kills a
 running job mid-step (a create or reset is then left half-done), so restart
 with `d2-broker restart`, which waits for the queue to empty, not with
-`launchctl kickstart -k`.
+`launchctl kickstart -k`. It also reloads the plist, so to change one of the
+settings above on a running host, add it to `EnvironmentVariables` in
+`~/Library/LaunchAgents/org.dhis2.d2-broker.plist` and run
+`d2-broker restart` (a kickstart keeps the old environment). `d2-broker
+install` keeps any `D2_*` entries already in that plist.
 
 **Operations notes.** Broker liveness is the launchd agent
 `org.dhis2.d2-broker` (`d2-broker status`), not a port check. A stopped
@@ -232,9 +246,11 @@ backup's `GET /seeds` entry.
 - **Why HTTP and not a file queue or docker.sock?** A fixed-verb HTTP API is
   client-agnostic (sandbox, widget, curl), needs no watcher process, and
   never hands out host-shell- or docker-equivalent access.
-- **Why global job serialization?** Port auto-selection in
-  `d2-instance-create` races under concurrency; instance ops are heavy
-  anyway.
+- **Why serialized lanes?** Port auto-selection in `d2-instance-create`
+  races under concurrency, and concurrent boots or analytics runs starve
+  each other. A single global worker did this too, but let one long
+  analytics run block every other session's creates and deletes, so
+  analytics and stop/delete got lanes of their own (2026-11-17).
 - **Restarts:** in-flight jobs are marked `interrupted`; logs and job
   snapshots persist on disk. The underlying d2-* script may have partially
   completed — check the job log.

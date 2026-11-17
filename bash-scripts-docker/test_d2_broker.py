@@ -332,6 +332,101 @@ class RequiredTomcatMajor(unittest.TestCase):
         self.assertIsNone(broker.required_tomcat_major(None))
 
 
+class KeptPlistEnv(unittest.TestCase):
+    PLIST = b"""<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>Label</key><string>org.dhis2.d2-broker</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>DHIS2_BASE</key><string>/x</string>
+    <key>PATH</key><string>/usr/bin</string>
+    <key>D2_BROKER_MAX_AGENT_INSTANCES</key><string>10</string>
+    <key>D2_DEFAULT_MEMORY</key><string>1536m</string>
+  </dict>
+</dict></plist>"""
+
+    def test_keeps_only_d2_keys(self):
+        self.assertEqual(broker.kept_plist_env(self.PLIST),
+                         {"D2_BROKER_MAX_AGENT_INSTANCES": "10",
+                          "D2_DEFAULT_MEMORY": "1536m"})
+
+    def test_missing_or_garbage_is_empty(self):
+        self.assertEqual(broker.kept_plist_env(b""), {})
+        self.assertEqual(broker.kept_plist_env(b"not a plist"), {})
+
+
+class JobLane(unittest.TestCase):
+    def test_analytics_lane(self):
+        self.assertEqual(broker.job_lane("analytics", []), "analytics")
+
+    def test_stop_and_delete_light(self):
+        self.assertEqual(broker.job_lane("stop", []), "light")
+        self.assertEqual(broker.job_lane("delete", []), "light")
+
+    def test_booting_and_restoring_ops_main(self):
+        for op in ("create", "reset", "start", "upgrade", "memory",
+                   "restart-db", "backup"):
+            self.assertEqual(broker.job_lane(op, []), "main", op)
+
+    def test_delete_joins_active_jobs_lane(self):
+        active = [{"op": "analytics", "lane": "analytics"}]
+        self.assertEqual(broker.job_lane("delete", active), "analytics")
+        active = [{"op": "create", "lane": "main"}]
+        self.assertEqual(broker.job_lane("delete", active), "main")
+
+    def test_delete_behind_laneless_job_goes_main(self):
+        # Jobs persisted before lanes existed carry no "lane" key.
+        self.assertEqual(broker.job_lane("delete", [{"op": "create"}]),
+                         "main")
+
+
+class JobManagerLanes(unittest.TestCase):
+    """Real worker threads with trivial argv steps (no Docker)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._old_base = os.environ.get("DHIS2_BASE")
+        os.environ["DHIS2_BASE"] = self.tmp.name
+        self.jm = broker.JobManager()
+
+    def tearDown(self):
+        if self._old_base is None:
+            os.environ.pop("DHIS2_BASE", None)
+        else:
+            os.environ["DHIS2_BASE"] = self._old_base
+        self.tmp.cleanup()
+
+    def _wait(self, job, timeout=10):
+        import time
+        end = time.time() + timeout
+        while time.time() < end:
+            if job["status"] not in ("queued", "running"):
+                return job["status"]
+            time.sleep(0.05)
+        return job["status"]
+
+    def test_main_lane_not_blocked_by_analytics(self):
+        slow = self.jm.submit("analytics", "a", [["sleep", "3"]])
+        fast = self.jm.submit("restart-db", "b", [["true"]])
+        self.assertEqual(self._wait(fast, timeout=2), "succeeded")
+        self.assertEqual(slow["status"], "running")
+        self.assertEqual(self._wait(slow), "succeeded")
+
+    def test_analytics_runs_serialize(self):
+        first = self.jm.submit("analytics", "a", [["sleep", "1"]])
+        second = self.jm.submit("analytics", "b", [["true"]])
+        self.assertEqual(second["status"], "queued")
+        self._wait(second)
+        self.assertGreaterEqual(second["started_at"], first["finished_at"])
+
+    def test_delete_queues_behind_instances_active_job(self):
+        os.makedirs(os.path.join(self.tmp.name, "a"))
+        slow = self.jm.submit("analytics", "a", [["sleep", "1"]])
+        delete = self.jm.submit("delete", "a", [["true"]])
+        self.assertEqual(delete["lane"], "analytics")
+        self.assertEqual(self._wait(delete), "succeeded")
+        self.assertGreaterEqual(delete["started_at"], slow["finished_at"])
+
+
 class JobsToPrune(unittest.TestCase):
     @staticmethod
     def _job(i, status="succeeded"):
@@ -453,7 +548,7 @@ class LoadPreviousPersists(unittest.TestCase):
             old = os.environ.get("DHIS2_BASE")
             os.environ["DHIS2_BASE"] = tmp
             real_worker = broker.JobManager._worker
-            broker.JobManager._worker = lambda self: None
+            broker.JobManager._worker = lambda self, lane: None
             try:
                 jobs = Path(tmp, "_broker", "jobs")
                 jobs.mkdir(parents=True)
@@ -488,7 +583,7 @@ class SubmitExclusive(unittest.TestCase):
         # Keep the worker thread inert so submitted jobs stay queued and
         # nothing writes to the temp dir behind the test's back.
         self._real_worker = broker.JobManager._worker
-        broker.JobManager._worker = lambda self: None
+        broker.JobManager._worker = lambda self, lane: None
         self.mgr = broker.JobManager()
 
     def tearDown(self):

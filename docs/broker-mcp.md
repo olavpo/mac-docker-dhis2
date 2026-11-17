@@ -68,7 +68,8 @@ works with zero configuration.
 | `wait_for_job` | Poll a job up to a timeout (default 60 s, max 240 s) |
 
 Mutations return a **job** immediately (the broker is asynchronous and
-serializes work globally); the model then calls `wait_for_job`
+serializes work within lanes: boots/restores, analytics, stop/delete); the
+model then calls `wait_for_job`
 repeatedly until the job is terminal. A create on a fresh database can
 take many minutes — that is Flyway, not a hang; the job's `log_tail`
 shows migration progress.
